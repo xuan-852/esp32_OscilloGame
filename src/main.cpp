@@ -1,13 +1,11 @@
 #include <Arduino.h>
 #include "pins.h"
 #include "freertos.h"
-#include "DACoutput.h"
 #include "vector_draw.h"
+#include "DACoutput.h"
 #include "FS.h"
 #include "SD_MMC.h"
-#include "dac8554.h"
 
-DAC8554 dac(10,11,12); // CS, MOSI, SCLK
 
 // --- Encoder Logic ---
 volatile int32_t encoderValue = 0;
@@ -146,7 +144,7 @@ void setup() {
   // 且 sendDAC 使用软件模拟 SPI，开销较大。
   // 80kHz (12.5us) 会导致 CPU 100% 占用，饿死主线程。
   // 降低到 30kHz (33us) 以释放 CPU 资源。
-  setDACFreq(30000); 
+  //setDACFreq(30000); 
 
   
   // 提交帧
