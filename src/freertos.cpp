@@ -4,6 +4,7 @@
 #include "DACoutput.h"
 #include "FS.h"
 #include "SD_MMC.h"
+#include "web_server.h"
 #include <Arduino.h>
 #include <stdio.h>
 #include <vector>
@@ -11,6 +12,11 @@
 
 // External variables from main.cpp
 extern volatile int32_t encoderValue;
+
+// Web Control Globals
+volatile int web_enc_delta = 0;
+volatile bool web_btn_pressed = false;
+volatile int web_game_dir = -1;
 
 // Task Handles
 static TaskHandle_t s_serialOutputTaskHandle = nullptr;
@@ -22,6 +28,14 @@ static int music_file_count = 0;
 static bool is_playing = false;
 static File audioFile;
 static uint16_t music_channels = 2; // 1: Mono, 2: Stereo
+
+// --- Video Player Variables ---
+static std::vector<std::string> video_files;
+static int video_file_count = 0;
+static bool is_video_playing = false;
+static File videoFile;
+static uint16_t video_channels = 4; // Should be 4
+
 
 // --- Snake Game Defines ---
 #define SNAKE_GRID_SIZE 20
@@ -183,6 +197,9 @@ void initTasks() {
       1 // Core 1
     );
   }
+
+  // Initialize Web Server on Core 0
+  initWebServer();
 }
 
 // --- GUI Logic ---
@@ -192,6 +209,8 @@ enum UI_State {
     UI_MENU_GAMES,
     UI_MENU_MUSIC,
     UI_MUSIC_PLAYER,
+    UI_MENU_VIDEO,
+    UI_VIDEO_PLAYER,
     UI_SNAKE,
     UI_BREAKOUT,
     UI_FLAPPY,
@@ -202,11 +221,12 @@ enum UI_State {
 
 static const char* main_menu_items[] = {
     "Music",
+    "Video",
     "Games",
     "Settings",
     "About"
 };
-static const int main_menu_count = 4;
+static const int main_menu_count = 5;
 
 static const char* games_menu_items[] = {
     "Snake",
@@ -675,7 +695,7 @@ bool Play_Music(const char* filename) {
     Serial.printf("File Size: %d\n", audioFile.size());
     
     is_playing = true;
-    Set_Audio_Mode(true);
+    Set_Player_Mode(1); // 1=Audio
     setDACFreq(sampleRate);
     return true;
 }
@@ -683,7 +703,90 @@ bool Play_Music(const char* filename) {
 void Stop_Music() {
     is_playing = false;
     if(audioFile) audioFile.close();
-    Set_Audio_Mode(false);
+    Set_Player_Mode(0); // 0=Vector
+}
+
+// --- Video Logic ---
+void Scan_Video_Files() {
+    video_files.clear();
+    File root = SD_MMC.open("/video");
+    if(!root || !root.isDirectory()){
+        Serial.println("Failed to open /video directory");
+        return;
+    }
+    File file = root.openNextFile();
+    while(file){
+        if(!file.isDirectory()){
+            String fname = file.name();
+            if(fname.endsWith(".wav") || fname.endsWith(".WAV")){
+                video_files.push_back(fname.c_str());
+            }
+        }
+        file = root.openNextFile();
+    }
+    video_file_count = video_files.size();
+}
+
+bool Play_Video(const char* filename) {
+    String path = "/video/" + String(filename);
+    videoFile = SD_MMC.open(path.c_str());
+    if(!videoFile) {
+        Serial.println("Failed to open video file");
+        return false;
+    }
+    
+    // Read WAV Header
+    uint8_t header[44];
+    if(videoFile.read(header, 44) != 44) {
+        Serial.println("Failed to read WAV header");
+        videoFile.close();
+        return false;
+    }
+    
+    // Check RIFF
+    if(header[0] != 'R' || header[1] != 'I' || header[2] != 'F' || header[3] != 'F') {
+        Serial.println("Not a RIFF file");
+        videoFile.close();
+        return false;
+    }
+    
+    // Get Sample Rate (Offset 24, 4 bytes)
+    uint32_t sampleRate = header[24] | (header[25] << 8) | (header[26] << 16) | (header[27] << 24);
+    Serial.printf("Sample Rate: %d\n", sampleRate);
+    
+    // Get Channels (Offset 22, 2 bytes)
+    uint16_t channels = header[22] | (header[23] << 8);
+    Serial.printf("Channels: %d\n", channels);
+    video_channels = channels;
+    
+    // Get Bits Per Sample (Offset 34, 2 bytes)
+    uint16_t bitsPerSample = header[34] | (header[35] << 8);
+    Serial.printf("Bits: %d\n", bitsPerSample);
+    
+    if(bitsPerSample != 16) {
+        Serial.println("Only 16-bit WAV supported");
+        videoFile.close();
+        return false;
+    }
+    
+    if(channels != 4) {
+        Serial.println("Only 4-channel WAV supported for Video");
+        videoFile.close();
+        return false;
+    }
+    
+    Serial.printf("File Size: %d\n", videoFile.size());
+    
+    is_video_playing = true;
+    Set_Player_Mode(2); // 2=Video
+    setDACFreq(sampleRate);
+    return true;
+}
+
+void Stop_Video() {
+    is_video_playing = false;
+    if(videoFile) videoFile.close();
+    Set_Player_Mode(0); // 0=Vector
 }
 
 static void guiTask(void* pvParameters) {
@@ -743,7 +846,7 @@ static void guiTask(void* pvParameters) {
         int16_t enc_delta = current_encoder - last_encoder;
         last_encoder = current_encoder;
         
-        // Merge Web Encoder
+        // Web Input Injection
         if (web_enc_delta != 0) {
             enc_delta += web_enc_delta;
             web_enc_delta = 0;
@@ -756,11 +859,12 @@ static void guiTask(void* pvParameters) {
         if (btn_state == HIGH && last_btn_state == LOW && (millis() - last_btn_time > 50)) {
             btn_pressed = true;
         }
-        // Merge Web Button
+        
         if (web_btn_pressed) {
             btn_pressed = true;
             web_btn_pressed = false;
         }
+
         // Record time when button goes LOW
         if (btn_state == LOW && last_btn_state == HIGH) {
             last_btn_time = millis();
@@ -774,7 +878,6 @@ static void guiTask(void* pvParameters) {
             if (touchRead(TOUCH_LEFT) > touch_base_left + TOUCH_DELTA) Game_Input_Dir = 2;
             if (touchRead(TOUCH_RIGHT) > touch_base_right + TOUCH_DELTA) Game_Input_Dir = 3;
             
-            // Web Input
             if (web_game_dir != -1) {
                 Game_Input_Dir = web_game_dir;
                 web_game_dir = -1;
@@ -800,12 +903,22 @@ static void guiTask(void* pvParameters) {
                     Scan_Music_Files();
                     menu_index = 0;
                     last_menu_index = -1;
+                    continue;
                 } else if (menu_index == 1) {
+                    ui_state = UI_MENU_VIDEO;
+                    Scan_Video_Files();
+                    menu_index = 0;
+                    last_menu_index = -1;
+                    continue;
+                } else if (menu_index == 2) {
                     ui_state = UI_MENU_GAMES;
                     menu_index = 0; // Reset for submenu
                     last_menu_index = -1;
-                } else if (menu_index == 3) {
+                    continue;
+                } else if (menu_index == 4) {
                     ui_state = UI_ABOUT;
+                    last_menu_index = -1; // Ensure redraw
+                    continue;
                 }
                 rebuild = true;
             }
@@ -843,22 +956,28 @@ static void guiTask(void* pvParameters) {
                 if (menu_index == 0) {
                     ui_state = UI_SNAKE;
                     Init_Snake_Game();
+                    continue;
                 } else if (menu_index == 1) {
                     ui_state = UI_BREAKOUT;
                     Init_Breakout_Game();
+                    continue;
                 } else if (menu_index == 2) {
                     ui_state = UI_FLAPPY;
                     Init_Flappy_Game();
+                    continue;
                 } else if (menu_index == 3) {
                     ui_state = UI_RACING;
                     Init_Racing_Game();
+                    continue;
                 } else if (menu_index == 4) {
                     ui_state = UI_RUNTINY;
                     Init_RunTiny_Game();
+                    continue;
                 } else if (menu_index == 5) {
                     ui_state = UI_MENU_MAIN;
                     menu_index = 1; // Return to "Games" selection
                     last_menu_index = -1;
+                    continue;
                 }
                 rebuild = true;
             }
@@ -897,10 +1016,12 @@ static void guiTask(void* pvParameters) {
                     ui_state = UI_MENU_MAIN;
                     menu_index = 0;
                     last_menu_index = -1;
+                    continue;
                 } else {
                     if(Play_Music(music_files[menu_index].c_str())) {
                         ui_state = UI_MUSIC_PLAYER;
                         last_menu_index = -1;
+                        continue;
                     } else {
                         // Failed to play, stay in menu
                         // Maybe show error?
@@ -989,6 +1110,13 @@ static void guiTask(void* pvParameters) {
                     if (volume > 256) volume = 256;
                     last_enc = curr_enc;
                 }
+                // Web Volume
+                if (web_enc_delta != 0) {
+                    volume += web_enc_delta;
+                    if (volume < 0) volume = 0;
+                    if (volume > 256) volume = 256;
+                    web_enc_delta = 0;
+                }
 
                 // 1. Fill Buffer A if free
                 if (Is_Buf_A_Free() && audioFile.available()) {
@@ -1073,16 +1201,6 @@ static void guiTask(void* pvParameters) {
                 }
                 
                 // 3. Check Exit Button (Polling)
-                // Check Web Exit
-                if (web_btn_pressed) {
-                    web_btn_pressed = false;
-                    Stop_Music();
-                    ui_state = UI_MENU_MUSIC;
-                    rebuild = true;
-                    last_menu_index = -1;
-                    break;
-                }
-
                 // Require Stable LOW
                 if (digitalRead(EN_S) == LOW) {
                     if (low_start == 0) low_start = millis();
@@ -1118,12 +1236,229 @@ static void guiTask(void* pvParameters) {
             if(read_buf) free(read_buf);
             Serial.println("Exited Music Loop");
             
+        } else if (ui_state == UI_MENU_VIDEO) {
+            // Navigation
+            if (enc_delta != 0) {
+                menu_index += enc_delta;
+                if (menu_index < 0) menu_index = video_file_count; // +1 for Back
+                if (menu_index > video_file_count) menu_index = 0;
+                rebuild = true;
+            }
+            
+            // Selection
+            if (btn_pressed) {
+                if (menu_index == video_file_count) {
+                    ui_state = UI_MENU_MAIN;
+                    menu_index = 1;
+                    last_menu_index = -1;
+                    continue;
+                } else {
+                    if(Play_Video(video_files[menu_index].c_str())) {
+                        ui_state = UI_VIDEO_PLAYER;
+                        last_menu_index = -1;
+                        continue;
+                    } else {
+                        // Failed to play
+                    }
+                }
+                rebuild = true;
+            }
+            
+            // Render Video Menu
+            if (rebuild || last_menu_index == -1) {
+                DRAW_Clear();
+                DRAW_AddRect(0, 0, 2047, 2047);
+                
+                int start_y = 1600;
+                int spacing = 300;
+                int scale = 30;
+                
+                // Calculate Scroll
+                if(menu_index < music_scroll) music_scroll = menu_index;
+                if(menu_index >= music_scroll + visible_lines) music_scroll = menu_index - visible_lines + 1;
+                
+                for(int i=0; i<visible_lines; i++) {
+                    int item_idx = music_scroll + i;
+                    int y = start_y - (i * spacing);
+                    
+                    if(item_idx <= video_file_count) {
+                        if(item_idx == menu_index) {
+                            DRAW_AddString(">", 0, 50, y, scale, scale);
+                        }
+                        
+                        if(item_idx == video_file_count) {
+                            DRAW_AddString("Back", 0, 250, y, scale, scale);
+                        } else {
+                            DRAW_AddString(video_files[item_idx].c_str(), 0, 250, y, scale, scale);
+                        }
+                    }
+                }
+                last_menu_index = menu_index;
+            }
+
+        } else if (ui_state == UI_VIDEO_PLAYER) {
+            // Exclusive Video Loop
+            
+            if (rebuild || last_menu_index == -1) {
+                DRAW_Clear();
+                DRAW_AddString("PLAYING VIDEO...", 0, 500, 1000, 20, 20);
+                DRAW_Update(); 
+                last_menu_index = 0;
+            }
+            
+            if (!is_video_playing) {
+                ui_state = UI_MENU_VIDEO;
+                rebuild = true;
+            }
+
+            Serial.println("Entering Video Loop");
+            unsigned long low_start = 0;
+            
+            uint8_t *read_buf = (uint8_t*)ps_malloc(65536);
+            if(read_buf == NULL) {
+                Serial.println("Failed to allocate 64KB read buffer!");
+                is_video_playing = false;
+            }
+
+            // Volume Control Init (Only for Audio Channels)
+            static int volume = 128; 
+            int32_t last_enc = encoderValue;
+            
+            while (is_video_playing && videoFile) {
+                // Update Volume
+                int32_t curr_enc = encoderValue;
+                int delta = (curr_enc - last_enc) / 4; 
+                if (delta != 0) {
+                    volume += delta;
+                    if (volume < 0) volume = 0;
+                    if (volume > 256) volume = 256;
+                    last_enc = curr_enc;
+                }
+                // Web Volume
+                if (web_enc_delta != 0) {
+                    volume += web_enc_delta;
+                    if (volume < 0) volume = 0;
+                    if (volume > 256) volume = 256;
+                    web_enc_delta = 0;
+                }
+
+                // 1. Fill Buffer A if free
+                if (Is_Buf_A_Free() && videoFile.available()) {
+                     int bytesToRead = 65536;
+                     if(videoFile.available() < bytesToRead) bytesToRead = videoFile.available();
+                     
+                     int bytesRead = videoFile.read(read_buf, bytesToRead);
+                     if(bytesRead > 0) {
+                         uint16_t* bufL = Get_Buf_A_L();
+                         uint16_t* bufR = Get_Buf_A_R();
+                         uint16_t* bufX = Get_Buf_A_X();
+                         uint16_t* bufY = Get_Buf_A_Y();
+                         int count = 0;
+                         
+                         int sample_idx = 0;
+                         while(sample_idx < bytesRead) {
+                            // 4 Channels, 16-bit = 8 bytes per frame
+                            if(sample_idx + 7 < bytesRead) {
+                                int16_t ch1 = (int16_t)(read_buf[sample_idx] | (read_buf[sample_idx+1] << 8));
+                                int16_t ch2 = (int16_t)(read_buf[sample_idx+2] | (read_buf[sample_idx+3] << 8));
+                                int16_t ch3 = (int16_t)(read_buf[sample_idx+4] | (read_buf[sample_idx+5] << 8));
+                                int16_t ch4 = (int16_t)(read_buf[sample_idx+6] | (read_buf[sample_idx+7] << 8));
+                                sample_idx += 8;
+                                
+                                // Apply Volume to Audio (Ch1/Ch2)
+                                ch1 = (int16_t)((ch1 * volume) >> 8);
+                                ch2 = (int16_t)((ch2 * volume) >> 8);
+                                
+                                // Map to Buffers
+                                // Ch1 -> DAC 2 (L)
+                                // Ch2 -> DAC 3 (R)
+                                // Ch3 -> DAC 0 (X)
+                                // Ch4 -> DAC 1 (Y)
+                                bufL[count] = (uint16_t)(ch1 + 32768);
+                                bufR[count] = (uint16_t)(ch2 + 32768);
+                                bufX[count] = (uint16_t)(ch3 + 32768);
+                                bufY[count] = (uint16_t)(ch4 + 32768);
+                                count++;
+                            } else break;
+                         }
+                         Mark_Buf_A_Ready(count);
+                     }
+                }
+
+                // 2. Fill Buffer B if free
+                if (Is_Buf_B_Free() && videoFile.available()) {
+                     int bytesToRead = 65536;
+                     if(videoFile.available() < bytesToRead) bytesToRead = videoFile.available();
+                     
+                     int bytesRead = videoFile.read(read_buf, bytesToRead);
+                     if(bytesRead > 0) {
+                         uint16_t* bufL = Get_Buf_B_L();
+                         uint16_t* bufR = Get_Buf_B_R();
+                         uint16_t* bufX = Get_Buf_B_X();
+                         uint16_t* bufY = Get_Buf_B_Y();
+                         int count = 0;
+                         
+                         int sample_idx = 0;
+                         while(sample_idx < bytesRead) {
+                            if(sample_idx + 7 < bytesRead) {
+                                int16_t ch1 = (int16_t)(read_buf[sample_idx] | (read_buf[sample_idx+1] << 8));
+                                int16_t ch2 = (int16_t)(read_buf[sample_idx+2] | (read_buf[sample_idx+3] << 8));
+                                int16_t ch3 = (int16_t)(read_buf[sample_idx+4] | (read_buf[sample_idx+5] << 8));
+                                int16_t ch4 = (int16_t)(read_buf[sample_idx+6] | (read_buf[sample_idx+7] << 8));
+                                sample_idx += 8;
+                                
+                                ch1 = (int16_t)((ch1 * volume) >> 8);
+                                ch2 = (int16_t)((ch2 * volume) >> 8);
+                                
+                                bufL[count] = (uint16_t)(ch1 + 32768);
+                                bufR[count] = (uint16_t)(ch2 + 32768);
+                                bufX[count] = (uint16_t)(ch3 + 32768);
+                                bufY[count] = (uint16_t)(ch4 + 32768);
+                                count++;
+                            } else break;
+                         }
+                         Mark_Buf_B_Ready(count);
+                     }
+                }
+                
+                // 3. Check Exit Button
+                if (digitalRead(EN_S) == LOW) {
+                    if (low_start == 0) low_start = millis();
+                    if (millis() - low_start > 50) { 
+                        Serial.println("Button Exit (Stable)");
+                        Stop_Video();
+                        ui_state = UI_MENU_VIDEO;
+                        rebuild = true;
+                        last_menu_index = -1;
+                        while(digitalRead(EN_S) == LOW) vTaskDelay(10);
+                        break; 
+                    }
+                } else {
+                    low_start = 0; 
+                }
+                
+                // 4. Check EOF
+                if(!videoFile.available() && Is_Buf_A_Free() && Is_Buf_B_Free()) {
+                    Serial.println("EOF Exit");
+                    Stop_Video();
+                    ui_state = UI_MENU_VIDEO;
+                    rebuild = true;
+                    break;
+                }
+                
+                vTaskDelay(1); 
+            }
+            
+            if(read_buf) free(read_buf);
+            Serial.println("Exited Video Loop");
+            
         } else if (ui_state == UI_SNAKE) {
             // Exit
             if (btn_pressed) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
                 last_menu_index = -1;
+                continue;
             }
             
             Update_Snake_Game();
@@ -1161,6 +1496,7 @@ static void guiTask(void* pvParameters) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
                 last_menu_index = -1;
+                continue;
             }
             
             Update_Breakout_Game(enc_delta);
@@ -1213,18 +1549,12 @@ static void guiTask(void* pvParameters) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
                 last_menu_index = -1;
+                continue;
             }
             
             // Input
             bool current_touch_up = (touchRead(TOUCH_UP) > touch_base_up + TOUCH_DELTA);
             int jump = 0;
-            
-            // Web Input
-            if (web_game_dir == 0) {
-                jump = 1;
-                web_game_dir = -1;
-            }
-
             if (current_touch_up && !last_touch_up) {
                 jump = 1;
             }
@@ -1281,6 +1611,7 @@ static void guiTask(void* pvParameters) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
                 last_menu_index = -1;
+                continue;
             }
             
             Update_Racing_Game(enc_delta);
@@ -1323,18 +1654,12 @@ static void guiTask(void* pvParameters) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
                 last_menu_index = -1;
+                continue;
             }
             
             // Input
             bool current_touch_up = (touchRead(TOUCH_UP) > touch_base_up + TOUCH_DELTA);
             int jump = 0;
-            
-            // Web Input
-            if (web_game_dir == 0) {
-                jump = 1;
-                web_game_dir = -1;
-            }
-
             if (current_touch_up && !last_touch_up) {
                 jump = 1;
             }
@@ -1387,6 +1712,7 @@ static void guiTask(void* pvParameters) {
                 ui_state = UI_MENU_MAIN;
                 rebuild = true;
                 last_menu_index = -1;
+                continue;
             }
             
             if (rebuild || last_menu_index == -1) {
