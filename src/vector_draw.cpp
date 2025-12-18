@@ -2,8 +2,8 @@
 #include <esp_heap_caps.h>
 
 // --- 配置 ---
-#define MAX_SHAPES 128      // 最大对象数
-#define MAX_RAW_LINES 4096  // 最大底层线段数
+#define MAX_SHAPES 256      // 最大对象数
+#define MAX_RAW_LINES 8192  // 最大底层线段数
 
 static uint8_t drawStepSize = 16; // 默认步长
 

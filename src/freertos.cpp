@@ -1,11 +1,13 @@
 #include "freertos.h"
 #include "pins.h"
 #include "vector_draw.h"
+#include "DACoutput.h"
+#include "FS.h"
+#include "SD_MMC.h"
 #include <Arduino.h>
 #include <stdio.h>
-#include "SD_MMC.h"
-#include "audio_common.h"
-#include "DACoutput.h" // For setDACFreq
+#include <vector>
+#include <string>
 
 // External variables from main.cpp
 extern volatile int32_t encoderValue;
@@ -13,6 +15,13 @@ extern volatile int32_t encoderValue;
 // Task Handles
 static TaskHandle_t s_serialOutputTaskHandle = nullptr;
 static TaskHandle_t s_guiTaskHandle = nullptr;
+
+// --- Music Player Variables ---
+static std::vector<std::string> music_files;
+static int music_file_count = 0;
+static bool is_playing = false;
+static File audioFile;
+static uint16_t music_channels = 2; // 1: Mono, 2: Stereo
 
 // --- Snake Game Defines ---
 #define SNAKE_GRID_SIZE 20
@@ -181,6 +190,7 @@ void initTasks() {
 enum UI_State {
     UI_MENU_MAIN,
     UI_MENU_GAMES,
+    UI_MENU_MUSIC,
     UI_MUSIC_PLAYER,
     UI_SNAKE,
     UI_BREAKOUT,
@@ -191,7 +201,7 @@ enum UI_State {
 };
 
 static const char* main_menu_items[] = {
-    "Music Player",
+    "Music",
     "Games",
     "Settings",
     "About"
@@ -207,73 +217,6 @@ static const char* games_menu_items[] = {
     "Back"
 };
 static const int games_menu_count = 6;
-
-// --- Music Player Variables ---
-#define MAX_MUSIC_FILES 20
-#define MAX_FILENAME_LEN 64
-static char music_files[MAX_MUSIC_FILES][MAX_FILENAME_LEN];
-static int music_file_count = 0;
-static int music_selected_index = 0;
-static File music_file;
-static bool music_is_playing = false;
-static uint32_t music_sample_rate = 44100;
-static uint16_t music_channels = 2;
-static uint32_t music_data_start = 44;
-static uint32_t music_data_size = 0;
-static uint32_t music_bytes_read = 0;
-
-void ScanMusicFiles() {
-    music_file_count = 0;
-    File root = SD_MMC.open("/music");
-    if(!root || !root.isDirectory()) return;
-    
-    File file = root.openNextFile();
-    while(file) {
-        if(!file.isDirectory()) {
-            const char* name = file.name();
-            int len = strlen(name);
-            if(len > 4 && strcasecmp(name + len - 4, ".wav") == 0) {
-                strncpy(music_files[music_file_count], name, MAX_FILENAME_LEN - 1);
-                music_files[music_file_count][MAX_FILENAME_LEN - 1] = 0;
-                music_file_count++;
-                if(music_file_count >= MAX_MUSIC_FILES) break;
-            }
-        }
-        file = root.openNextFile();
-    }
-    root.close();
-}
-
-bool OpenMusicFile(const char* filename) {
-    char path[128];
-    snprintf(path, sizeof(path), "/music/%s", filename);
-    
-    if(music_file) music_file.close();
-    music_file = SD_MMC.open(path);
-    if(!music_file) return false;
-    
-    // Parse WAV Header
-    uint8_t header[44];
-    if(music_file.read(header, 44) != 44) return false;
-    
-    // Check "RIFF" and "WAVE"
-    if(memcmp(header, "RIFF", 4) != 0 || memcmp(header + 8, "WAVE", 4) != 0) return false;
-    
-    music_channels = header[22];
-    music_sample_rate = *(uint32_t*)(header + 24);
-    music_data_size = *(uint32_t*)(header + 40);
-    music_data_start = 44; // Simplified, assuming standard header
-    
-    Serial.printf("WAV: %d Hz, %d Ch, Size: %d\n", music_sample_rate, music_channels, music_data_size);
-
-    music_bytes_read = 0;
-    
-    // Reset Buffer
-    bufferHead = 0;
-    bufferTail = 0;
-    
-    return true;
-}
 
 // --- Snake Game Logic ---
 void Init_Snake_Game(void) {
@@ -666,7 +609,87 @@ void Update_RunTiny_Game(int jump_requested) {
     }
 }
 
+// --- Music Logic ---
+void Scan_Music_Files() {
+    music_files.clear();
+    File root = SD_MMC.open("/music");
+    if(!root || !root.isDirectory()){
+        Serial.println("Failed to open /music directory");
+        return;
+    }
+    File file = root.openNextFile();
+    while(file){
+        if(!file.isDirectory()){
+            String fname = file.name();
+            if(fname.endsWith(".wav") || fname.endsWith(".WAV")){
+                music_files.push_back(fname.c_str());
+            }
+        }
+        file = root.openNextFile();
+    }
+    music_file_count = music_files.size();
+}
+
+bool Play_Music(const char* filename) {
+    String path = "/music/" + String(filename);
+    audioFile = SD_MMC.open(path.c_str());
+    if(!audioFile) {
+        Serial.println("Failed to open audio file");
+        return false;
+    }
+    
+    // Read WAV Header
+    uint8_t header[44];
+    if(audioFile.read(header, 44) != 44) {
+        Serial.println("Failed to read WAV header");
+        audioFile.close();
+        return false;
+    }
+    
+    // Check RIFF
+    if(header[0] != 'R' || header[1] != 'I' || header[2] != 'F' || header[3] != 'F') {
+        Serial.println("Not a RIFF file");
+        audioFile.close();
+        return false;
+    }
+    
+    // Get Sample Rate (Offset 24, 4 bytes)
+    uint32_t sampleRate = header[24] | (header[25] << 8) | (header[26] << 16) | (header[27] << 24);
+    Serial.printf("Sample Rate: %d\n", sampleRate);
+    
+    // Get Channels (Offset 22, 2 bytes)
+    uint16_t channels = header[22] | (header[23] << 8);
+    Serial.printf("Channels: %d\n", channels);
+    music_channels = channels;
+    
+    // Get Bits Per Sample (Offset 34, 2 bytes)
+    uint16_t bitsPerSample = header[34] | (header[35] << 8);
+    Serial.printf("Bits: %d\n", bitsPerSample);
+    
+    if(bitsPerSample != 16) {
+        Serial.println("Only 16-bit WAV supported");
+        audioFile.close();
+        return false;
+    }
+    
+    Serial.printf("File Size: %d\n", audioFile.size());
+    
+    is_playing = true;
+    Set_Audio_Mode(true);
+    setDACFreq(sampleRate);
+    return true;
+}
+
+void Stop_Music() {
+    is_playing = false;
+    if(audioFile) audioFile.close();
+    Set_Audio_Mode(false);
+}
+
 static void guiTask(void* pvParameters) {
+    // Wait for system to stabilize
+    vTaskDelay(pdMS_TO_TICKS(500));
+
     // Calibration
     int touch_base_up = 0;
     int touch_base_down = 0;
@@ -675,10 +698,10 @@ static void guiTask(void* pvParameters) {
     
     // Take samples
     for(int i=0; i<20; i++) {
-        //touch_base_up += touchRead(TOUCH_UP);
-        //touch_base_down += touchRead(TOUCH_DOWN);
-        //touch_base_left += touchRead(TOUCH_LEFT);
-        //touch_base_right += touchRead(TOUCH_RIGHT);
+        touch_base_up += touchRead(TOUCH_UP);
+        touch_base_down += touchRead(TOUCH_DOWN);
+        touch_base_left += touchRead(TOUCH_LEFT);
+        touch_base_right += touchRead(TOUCH_RIGHT);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     touch_base_up /= 20;
@@ -686,8 +709,14 @@ static void guiTask(void* pvParameters) {
     touch_base_left /= 20;
     touch_base_right /= 20;
     
+    Serial.printf("Calibrated Touch Base: U=%d D=%d L=%d R=%d\n", 
+        touch_base_up, touch_base_down, touch_base_left, touch_base_right);
+    
     // Define a delta
-    const int TOUCH_DELTA = 30000; 
+    // Idle ~30000, Pressed > 70000.
+    // If calibration fails (0), 35000 is safe (30000 < 35000).
+    // If calibration works (30000), Threshold 65000. Pressed (70000+) > 65000.
+    const int TOUCH_DELTA = 35000; 
 
     UI_State ui_state = UI_MENU_MAIN;
     int menu_index = 0;
@@ -698,8 +727,12 @@ static void guiTask(void* pvParameters) {
     int last_btn_state = HIGH;
     unsigned long last_btn_time = 0;
     
-    // Music Player state
-    bool music_menu_active = true;
+    // Oscilloscope state
+    int32_t osc_last_val = -999999;
+
+    // Music state
+    int music_scroll = 0;
+    const int visible_lines = 5;
 
     // Flappy state
     bool last_touch_up = false;
@@ -710,11 +743,26 @@ static void guiTask(void* pvParameters) {
         int16_t enc_delta = current_encoder - last_encoder;
         last_encoder = current_encoder;
         
+        // Merge Web Encoder
+        if (web_enc_delta != 0) {
+            enc_delta += web_enc_delta;
+            web_enc_delta = 0;
+        }
+        
         int btn_state = digitalRead(EN_S);
         bool btn_pressed = false;
         
-        if (btn_state == LOW && last_btn_state == HIGH && (millis() - last_btn_time > 50)) {
+        // Trigger on Release (Rising Edge) to prevent holding issues
+        if (btn_state == HIGH && last_btn_state == LOW && (millis() - last_btn_time > 50)) {
             btn_pressed = true;
+        }
+        // Merge Web Button
+        if (web_btn_pressed) {
+            btn_pressed = true;
+            web_btn_pressed = false;
+        }
+        // Record time when button goes LOW
+        if (btn_state == LOW && last_btn_state == HIGH) {
             last_btn_time = millis();
         }
         last_btn_state = btn_state;
@@ -725,6 +773,12 @@ static void guiTask(void* pvParameters) {
             if (touchRead(TOUCH_DOWN) > touch_base_down + TOUCH_DELTA) Game_Input_Dir = 1;
             if (touchRead(TOUCH_LEFT) > touch_base_left + TOUCH_DELTA) Game_Input_Dir = 2;
             if (touchRead(TOUCH_RIGHT) > touch_base_right + TOUCH_DELTA) Game_Input_Dir = 3;
+            
+            // Web Input
+            if (web_game_dir != -1) {
+                Game_Input_Dir = web_game_dir;
+                web_game_dir = -1;
+            }
         }
 
         // 2. State Machine
@@ -742,10 +796,9 @@ static void guiTask(void* pvParameters) {
             // Selection
             if (btn_pressed) {
                 if (menu_index == 0) {
-                    ui_state = UI_MUSIC_PLAYER;
-                    ScanMusicFiles();
-                    music_menu_active = true;
-                    music_selected_index = 0;
+                    ui_state = UI_MENU_MUSIC;
+                    Scan_Music_Files();
+                    menu_index = 0;
                     last_menu_index = -1;
                 } else if (menu_index == 1) {
                     ui_state = UI_MENU_GAMES;
@@ -829,169 +882,241 @@ static void guiTask(void* pvParameters) {
                 last_menu_index = menu_index;
             }
 
-        } else if (ui_state == UI_MUSIC_PLAYER) {
-            // Volume Control (Encoder)
+        } else if (ui_state == UI_MENU_MUSIC) {
+            // Navigation
             if (enc_delta != 0) {
-                if (music_menu_active) {
-                    music_selected_index += enc_delta;
-                    if (music_selected_index < 0) music_selected_index = music_file_count - 1;
-                    if (music_selected_index >= music_file_count) music_selected_index = 0;
-                    rebuild = true;
-                } else {
-                    // Adjust Volume
-                    int new_vol = audioVolume + enc_delta * 5;
-                    if (new_vol < 0) new_vol = 0;
-                    if (new_vol > 100) new_vol = 100;
-                    audioVolume = new_vol;
-                    rebuild = true; // Redraw volume
-                }
+                menu_index += enc_delta;
+                if (menu_index < 0) menu_index = music_file_count; // +1 for Back
+                if (menu_index > music_file_count) menu_index = 0;
+                rebuild = true;
             }
             
-            // Button
+            // Selection
             if (btn_pressed) {
-                if (music_menu_active) {
-                    // Select File
-                    if (music_file_count > 0) {
-                        if (OpenMusicFile(music_files[music_selected_index])) {
-                            music_menu_active = false;
-                            music_is_playing = true;
-                            
-                            // Pre-fill buffer
-                            int prefill_count = 0;
-                            uint8_t chunkBuf[512];
-                            while (!audioBufferFull() && music_file.available() && prefill_count < AUDIO_BUFFER_SIZE - 100) {
-                                int bytesToRead = 512;
-                                int bytesRead = music_file.read(chunkBuf, bytesToRead);
-                                if (bytesRead > 0) {
-                                    for (int i = 0; i < bytesRead; i += (music_channels == 2 ? 4 : 2)) {
-                                        if (audioBufferFull()) break;
-                                        
-                                        int16_t left, right;
-                                        if (music_channels == 2) {
-                                            if (i + 3 < bytesRead) {
-                                                left = (int16_t)(chunkBuf[i] | (chunkBuf[i+1] << 8));
-                                                right = (int16_t)(chunkBuf[i+2] | (chunkBuf[i+3] << 8));
-                                            } else break;
-                                        } else {
-                                            if (i + 1 < bytesRead) {
-                                                left = (int16_t)(chunkBuf[i] | (chunkBuf[i+1] << 8));
-                                                right = left;
-                                            } else break;
-                                        }
-                                        uint16_t dac_l = ((int32_t)left * audioVolume / 100) + 32768;
-                                        uint16_t dac_r = ((int32_t)right * audioVolume / 100) + 32768;
-                                        uint32_t packed = dac_l | (dac_r << 16);
-                                        audioBuffer[bufferHead] = packed;
-                                        bufferHead = (bufferHead + 1) % AUDIO_BUFFER_SIZE;
-                                        prefill_count++;
-                                    }
-                                } else {
-                                    break;
-                                }
-                            }
-                            
-                            audioPlaying = true;
-                            // Set DAC Freq to match audio
-                            setDACFreq(music_sample_rate); 
-                        }
-                    } else {
-                        // No files, exit
-                        ui_state = UI_MENU_MAIN;
-                        rebuild = true;
-                    }
+                if (menu_index == music_file_count) {
+                    ui_state = UI_MENU_MAIN;
+                    menu_index = 0;
+                    last_menu_index = -1;
                 } else {
-                    // Stop / Back
-                    music_is_playing = false;
-                    audioPlaying = false;
-                    if(music_file) music_file.close();
-                    music_menu_active = true;
-                    rebuild = true;
-                    // Restore default DAC freq
-                    setDACFreq(30000);
-                }
-            }
-            
-            // Playback Logic
-            if (music_is_playing && music_file) {
-                // Fill Buffer - Read in chunks for efficiency
-                int bytes_processed = 0;
-                uint8_t chunkBuf[512];
-                
-                while (!audioBufferFull() && music_file.available() && bytes_processed < 4096) {
-                    int bytesToRead = 512;
-                    int bytesRead = music_file.read(chunkBuf, bytesToRead);
-                    
-                    if (bytesRead > 0) {
-                        bytes_processed += bytesRead;
-                        for (int i = 0; i < bytesRead; i += (music_channels == 2 ? 4 : 2)) {
-                             if (audioBufferFull()) break;
-                             
-                             int16_t left, right;
-                             if (music_channels == 2) {
-                                 if (i + 3 < bytesRead) {
-                                     left = (int16_t)(chunkBuf[i] | (chunkBuf[i+1] << 8));
-                                     right = (int16_t)(chunkBuf[i+2] | (chunkBuf[i+3] << 8));
-                                 } else break;
-                             } else {
-                                 if (i + 1 < bytesRead) {
-                                     left = (int16_t)(chunkBuf[i] | (chunkBuf[i+1] << 8));
-                                     right = left;
-                                 } else break;
-                             }
-                             
-                             uint16_t dac_l = ((int32_t)left * audioVolume / 100) + 32768;
-                             uint16_t dac_r = ((int32_t)right * audioVolume / 100) + 32768;
-                             uint32_t packed = dac_l | (dac_r << 16);
-                             audioBuffer[bufferHead] = packed;
-                             bufferHead = (bufferHead + 1) % AUDIO_BUFFER_SIZE;
-                        }
+                    if(Play_Music(music_files[menu_index].c_str())) {
+                        ui_state = UI_MUSIC_PLAYER;
+                        last_menu_index = -1;
                     } else {
-                        // End of file
-                        music_is_playing = false;
-                        audioPlaying = false;
-                        music_menu_active = true;
-                        rebuild = true;
-                        setDACFreq(30000); // Restore default
-                        break;
+                        // Failed to play, stay in menu
+                        // Maybe show error?
                     }
                 }
+                rebuild = true;
             }
             
-            // Render
+            // Render Music Menu
             if (rebuild || last_menu_index == -1) {
                 DRAW_Clear();
                 DRAW_AddRect(0, 0, 2047, 2047);
                 
-                if (music_menu_active) {
-                    DRAW_AddString("SELECT MUSIC", 0, 500, 1800, 20, 20);
-                    if (music_file_count == 0) {
-                        DRAW_AddString("NO FILES", 0, 600, 1000, 20, 20);
-                    } else {
-                        int start_y = 1500;
-                        for (int i = 0; i < 5; i++) { // Show 5 files
-                            int idx = (music_selected_index - 2 + i + music_file_count) % music_file_count;
-                            int y = start_y - (i * 250);
-                            if (i == 2) { // Center item
-                                DRAW_AddString(">", 0, 50, y, 25, 25);
-                                DRAW_AddString(music_files[idx], 0, 200, y, 25, 25);
-                            } else {
-                                DRAW_AddString(music_files[idx], 0, 200, y, 15, 15);
-                            }
+                int start_y = 1600;
+                int spacing = 300;
+                int scale = 30;
+                
+                // Calculate Scroll
+                if(menu_index < music_scroll) music_scroll = menu_index;
+                if(menu_index >= music_scroll + visible_lines) music_scroll = menu_index - visible_lines + 1;
+                
+                for(int i=0; i<visible_lines; i++) {
+                    int item_idx = music_scroll + i;
+                    int y = start_y - (i * spacing);
+                    
+                    if(item_idx <= music_file_count) {
+                        if(item_idx == menu_index) {
+                            DRAW_AddString(">", 0, 50, y, scale, scale);
+                        }
+                        
+                        if(item_idx == music_file_count) {
+                            DRAW_AddString("Back", 0, 250, y, scale, scale);
+                        } else {
+                            DRAW_AddString(music_files[item_idx].c_str(), 0, 250, y, scale, scale);
                         }
                     }
-                } else {
-                    // Playing Screen
-                    DRAW_AddString("PLAYING", 0, 600, 1800, 20, 20);
-                    DRAW_AddString(music_files[music_selected_index], 0, 100, 1400, 20, 20);
-                    
-                    char vol_str[32];
-                    sprintf(vol_str, "VOL: %d%%", audioVolume);
-                    DRAW_AddString(vol_str, 0, 600, 800, 25, 25);
-                    
-                    DRAW_AddString("[BTN] STOP", 0, 600, 400, 15, 15);
                 }
-                last_menu_index = 0;
+                last_menu_index = menu_index;
             }
+
+        } else if (ui_state == UI_MUSIC_PLAYER) {
+            // Exclusive Audio Loop - Blocking Mode
+            // This ensures maximum CPU time for buffer filling and prevents UI starvation
+            
+            // Clear screen once
+            if (rebuild || last_menu_index == -1) {
+                DRAW_Clear();
+                // Draw a simple "Playing" indicator
+                DRAW_AddString("PLAYING...", 0, 500, 1000, 20, 20);
+                DRAW_Update(); 
+                last_menu_index = 0;
+                // Removed "Wait for release" loop as we now enter on Release
+            }
+            
+            // Safety check: If not playing, go back
+            if (!is_playing) {
+                ui_state = UI_MENU_MUSIC;
+                rebuild = true;
+            }
+
+            // Enter blocking loop
+            Serial.println("Entering Music Loop");
+            
+            // Reset debounce timer
+            unsigned long low_start = 0;
+            
+            // Allocate a 64KB temp buffer in PSRAM for reading
+            // 64KB = 65536 bytes
+            uint8_t *read_buf = (uint8_t*)ps_malloc(65536);
+            if(read_buf == NULL) {
+                Serial.println("Failed to allocate 64KB read buffer!");
+                is_playing = false;
+            }
+
+            // Volume Control Init
+            static int volume = 128; // 0-256. Default 50%
+            int32_t last_enc = encoderValue;
+            
+            while (is_playing && audioFile) {
+                // Update Volume
+                int32_t curr_enc = encoderValue;
+                int delta = (curr_enc - last_enc) / 4; // Sensitivity: 4 encoder counts (1 detent) = 1 volume step
+                if (delta != 0) {
+                    volume += delta;
+                    if (volume < 0) volume = 0;
+                    if (volume > 256) volume = 256;
+                    last_enc = curr_enc;
+                }
+
+                // 1. Fill Buffer A if free
+                if (Is_Buf_A_Free() && audioFile.available()) {
+                     int bytesToRead = 65536;
+                     if(audioFile.available() < bytesToRead) bytesToRead = audioFile.available();
+                     
+                     int bytesRead = audioFile.read(read_buf, bytesToRead);
+                     if(bytesRead > 0) {
+                         uint16_t* bufL = Get_Buf_A_L();
+                         uint16_t* bufR = Get_Buf_A_R();
+                         int count = 0;
+                         
+                         int sample_idx = 0;
+                         while(sample_idx < bytesRead) {
+                            int16_t l, r;
+                            if(music_channels == 1) {
+                                // Mono: 2 bytes
+                                if(sample_idx + 1 < bytesRead) {
+                                    int16_t val = (int16_t)(read_buf[sample_idx] | (read_buf[sample_idx+1] << 8));
+                                    l = val; r = val;
+                                    sample_idx += 2;
+                                } else break;
+                            } else {
+                                // Stereo: 4 bytes
+                                if(sample_idx + 3 < bytesRead) {
+                                    l = (int16_t)(read_buf[sample_idx] | (read_buf[sample_idx+1] << 8));
+                                    r = (int16_t)(read_buf[sample_idx+2] | (read_buf[sample_idx+3] << 8));
+                                    sample_idx += 4;
+                                } else break;
+                            }
+                            // Apply Volume
+                            l = (int16_t)((l * volume) >> 8);
+                            r = (int16_t)((r * volume) >> 8);
+
+                            bufL[count] = (uint16_t)(l + 32768);
+                            bufR[count] = (uint16_t)(r + 32768);
+                            count++;
+                         }
+                         Mark_Buf_A_Ready(count);
+                     }
+                }
+
+                // 2. Fill Buffer B if free
+                if (Is_Buf_B_Free() && audioFile.available()) {
+                     int bytesToRead = 65536;
+                     if(audioFile.available() < bytesToRead) bytesToRead = audioFile.available();
+                     
+                     int bytesRead = audioFile.read(read_buf, bytesToRead);
+                     if(bytesRead > 0) {
+                         uint16_t* bufL = Get_Buf_B_L();
+                         uint16_t* bufR = Get_Buf_B_R();
+                         int count = 0;
+                         
+                         int sample_idx = 0;
+                         while(sample_idx < bytesRead) {
+                            int16_t l, r;
+                            if(music_channels == 1) {
+                                // Mono: 2 bytes
+                                if(sample_idx + 1 < bytesRead) {
+                                    int16_t val = (int16_t)(read_buf[sample_idx] | (read_buf[sample_idx+1] << 8));
+                                    l = val; r = val;
+                                    sample_idx += 2;
+                                } else break;
+                            } else {
+                                // Stereo: 4 bytes
+                                if(sample_idx + 3 < bytesRead) {
+                                    l = (int16_t)(read_buf[sample_idx] | (read_buf[sample_idx+1] << 8));
+                                    r = (int16_t)(read_buf[sample_idx+2] | (read_buf[sample_idx+3] << 8));
+                                    sample_idx += 4;
+                                } else break;
+                            }
+                            // Apply Volume
+                            l = (int16_t)((l * volume) >> 8);
+                            r = (int16_t)((r * volume) >> 8);
+
+                            bufL[count] = (uint16_t)(l + 32768);
+                            bufR[count] = (uint16_t)(r + 32768);
+                            count++;
+                         }
+                         Mark_Buf_B_Ready(count);
+                     }
+                }
+                
+                // 3. Check Exit Button (Polling)
+                // Check Web Exit
+                if (web_btn_pressed) {
+                    web_btn_pressed = false;
+                    Stop_Music();
+                    ui_state = UI_MENU_MUSIC;
+                    rebuild = true;
+                    last_menu_index = -1;
+                    break;
+                }
+
+                // Require Stable LOW
+                if (digitalRead(EN_S) == LOW) {
+                    if (low_start == 0) low_start = millis();
+                    if (millis() - low_start > 50) { // Stable for 50ms
+                        Serial.println("Button Exit (Stable)");
+                        Stop_Music();
+                        ui_state = UI_MENU_MUSIC;
+                        rebuild = true;
+                        last_menu_index = -1;
+                        
+                        // Wait for release again
+                        while(digitalRead(EN_S) == LOW) vTaskDelay(10);
+                        break; 
+                    }
+                } else {
+                    low_start = 0; // Reset if HIGH detected
+                }
+                
+                // 4. Check EOF
+                if(!audioFile.available() && Is_Buf_A_Free() && Is_Buf_B_Free()) {
+                    // Only exit if file is done AND both buffers are empty (played out)
+                    Serial.println("EOF Exit");
+                    Stop_Music();
+                    ui_state = UI_MENU_MUSIC;
+                    rebuild = true;
+                    break;
+                }
+                
+                // 5. Yield slightly
+                vTaskDelay(1); 
+            }
+            
+            if(read_buf) free(read_buf);
+            Serial.println("Exited Music Loop");
             
         } else if (ui_state == UI_SNAKE) {
             // Exit
@@ -1093,6 +1218,13 @@ static void guiTask(void* pvParameters) {
             // Input
             bool current_touch_up = (touchRead(TOUCH_UP) > touch_base_up + TOUCH_DELTA);
             int jump = 0;
+            
+            // Web Input
+            if (web_game_dir == 0) {
+                jump = 1;
+                web_game_dir = -1;
+            }
+
             if (current_touch_up && !last_touch_up) {
                 jump = 1;
             }
@@ -1196,6 +1328,13 @@ static void guiTask(void* pvParameters) {
             // Input
             bool current_touch_up = (touchRead(TOUCH_UP) > touch_base_up + TOUCH_DELTA);
             int jump = 0;
+            
+            // Web Input
+            if (web_game_dir == 0) {
+                jump = 1;
+                web_game_dir = -1;
+            }
+
             if (current_touch_up && !last_touch_up) {
                 jump = 1;
             }
@@ -1262,16 +1401,10 @@ static void guiTask(void* pvParameters) {
         }
 
         // Update animations and Render
-        if (!(ui_state == UI_MUSIC_PLAYER && music_is_playing)) {
-            DRAW_Update();
-            DRAW_Render();
-        }
+        DRAW_Update();
+        DRAW_Render();
 
-        if (ui_state == UI_MUSIC_PLAYER && music_is_playing) {
-             vTaskDelay(pdMS_TO_TICKS(10)); // Faster update for audio filling
-        } else {
-             vTaskDelay(pdMS_TO_TICKS(40)); // 25Hz update rate
-        }
+        vTaskDelay(pdMS_TO_TICKS(40)); // 25Hz update rate
     }
 }
 

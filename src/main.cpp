@@ -7,10 +7,16 @@
 #include "SD_MMC.h"
 #include "dac8554.h"
 
-DAC8554 dac(10,11,12); // CS, MOSI, SCLK
+// Use Hardware SPI (CS=10). SPI pins are default (MOSI=11, SCLK=12)
+DAC8554 dac(DAC_CS); 
 
 // --- Encoder Logic ---
 volatile int32_t encoderValue = 0;
+
+// Web Control Variables
+volatile int web_enc_delta = 0;
+volatile bool web_btn_pressed = false;
+volatile int web_game_dir = -1;
 
 void IRAM_ATTR readEncoderISR() {
   static uint8_t old_AB = 3; // Assume start at 11 (pullup)
@@ -147,7 +153,7 @@ void setup() {
   // 且 sendDAC 使用软件模拟 SPI，开销较大。
   // 80kHz (12.5us) 会导致 CPU 100% 占用，饿死主线程。
   // 降低到 30kHz (33us) 以释放 CPU 资源。
-  setDACFreq(30000); 
+  setDACFreq(80000); 
 
   
   // 提交帧
@@ -159,9 +165,17 @@ DRAW_Terminal_Print("SYSTEM BOOT...");
 DRAW_Terminal_Print("CHECKING RAM...");
 
   Serial.println("Hardware initialization complete. Serial output task started.");
+  pinMode(1,OUTPUT);
+  pinMode(2,OUTPUT);
+    digitalWrite(1,HIGH);
+    digitalWrite(2,HIGH);
 }
 
 void loop() {
   // Main loop is empty, UI handled by FreeRTOS task
-  delay(1000); 
+  delay(100); 
+  static bool ledState = false;
+    ledState = !ledState;
+    digitalWrite(1,ledState);
+    digitalWrite(2,!ledState);
 }
