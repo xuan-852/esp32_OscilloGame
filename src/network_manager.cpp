@@ -17,8 +17,10 @@ static const unsigned long PEER_TIMEOUT = 3000; // 3s timeout for peers
 // Game State
 static volatile bool game_request_pending = false;
 static volatile uint8_t game_request_id = 0;
+static volatile uint32_t game_request_seed = 0;
 static TankData remote_tank_data;
 static volatile bool remote_game_ended = false;
+static volatile uint8_t remote_game_end_reason = 0;
 
 // Callbacks
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
@@ -110,7 +112,8 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     else if (msg->type == MSG_START_GAME) {
         if (current_state == NET_CONNECTED || current_state == NET_IN_GAME) {
             if (memcmp(connected_peer_mac, msg->src_mac, 6) == 0) {
-                game_request_id = msg->payload.game_id;
+                game_request_id = msg->payload.start_req.game_id;
+                game_request_seed = msg->payload.start_req.seed;
                 game_request_pending = true;
                 current_state = NET_IN_GAME;
             }
@@ -129,6 +132,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
         if (current_state == NET_IN_GAME) {
             if (memcmp(connected_peer_mac, msg->src_mac, 6) == 0) {
                 remote_game_ended = true;
+                remote_game_end_reason = msg->payload.end_req.reason;
                 current_state = NET_CONNECTED;
             }
         }
@@ -204,14 +208,15 @@ void Network_Manager::update() {
     }
 }
 
-void Network_Manager::startGame(uint8_t gameId) {
+void Network_Manager::startGame(uint8_t gameId, uint32_t seed) {
     if (current_state != NET_CONNECTED && current_state != NET_IN_GAME) return;
     
     NetMessage msg;
     msg.type = MSG_START_GAME;
     memcpy(msg.src_mac, my_mac, 6);
     strncpy(msg.name, my_name, 16);
-    msg.payload.game_id = gameId;
+    msg.payload.start_req.game_id = gameId;
+    msg.payload.start_req.seed = seed;
     
     esp_now_send(connected_peer_mac, (uint8_t *) &msg, sizeof(msg));
     current_state = NET_IN_GAME;
@@ -229,21 +234,23 @@ void Network_Manager::sendGameData(const TankData& data) {
     esp_now_send(connected_peer_mac, (uint8_t *) &msg, sizeof(msg));
 }
 
-void Network_Manager::endGame() {
+void Network_Manager::endGame(uint8_t reason) {
     if (current_state != NET_IN_GAME) return;
     
     NetMessage msg;
     msg.type = MSG_END_GAME;
     memcpy(msg.src_mac, my_mac, 6);
     strncpy(msg.name, my_name, 16);
+    msg.payload.end_req.reason = reason;
     
     esp_now_send(connected_peer_mac, (uint8_t *) &msg, sizeof(msg));
     current_state = NET_CONNECTED;
 }
 
-bool Network_Manager::hasGameRequest(uint8_t* gameIdOut) {
+bool Network_Manager::hasGameRequest(uint8_t* gameIdOut, uint32_t* seedOut) {
     if (game_request_pending) {
         *gameIdOut = game_request_id;
+        *seedOut = game_request_seed;
         return true;
     }
     return false;
@@ -258,8 +265,12 @@ bool Network_Manager::getRemoteGameData(TankData* dataOut) {
     return true;
 }
 
-bool Network_Manager::isRemoteGameEnded() {
-    return remote_game_ended;
+bool Network_Manager::isRemoteGameEnded(uint8_t* reasonOut) {
+    if(remote_game_ended) {
+        *reasonOut = remote_game_end_reason;
+        return true;
+    }
+    return false;
 }
 
 void Network_Manager::clearRemoteGameEnded() {

@@ -170,6 +170,7 @@ typedef struct {
     float x, y;
     float vx, vy;
     bool active;
+    int bounce_count;
 } Bullet;
 
 static Tank my_tank;
@@ -653,7 +654,99 @@ void Update_RunTiny_Game(int jump_requested) {
 }
 
 // --- Tank Game Logic ---
-void Init_Tank_Game(void) {
+
+// --- Tank Game Map ---
+#define TANK_MAP_SIZE 6
+typedef struct {
+    int x, y, w, h;
+    int type; // 0: Wall (Bounce), 1: Water (Tank Block, Bullet Pass)
+} TankMapObject;
+
+static TankMapObject tank_map[TANK_MAP_SIZE] = {
+    {500, 500, 100, 400, 0},   // Wall 1
+    {1400, 1200, 100, 400, 0}, // Wall 2
+    {800, 1000, 400, 100, 0},  // Wall 3
+    {200, 1500, 300, 300, 1},  // Water 1
+    {1500, 200, 300, 300, 1},  // Water 2
+    {900, 400, 200, 200, 1}    // Water 3
+};
+
+bool Check_Tank_Collision(float x, float y) {
+    // Check Map Objects
+    for(int i=0; i<TANK_MAP_SIZE; i++) {
+        // Simple AABB vs Point (Tank Center)
+        if(x >= tank_map[i].x && x <= tank_map[i].x + tank_map[i].w &&
+           y >= tank_map[i].y && y <= tank_map[i].y + tank_map[i].h) {
+            return true; // Collision
+        }
+    }
+    return false;
+}
+
+// Returns true if bounced
+bool Check_Bullet_Collision(float &x, float &y, float &vx, float &vy, int &bounce_count) {
+    bool bounced = false;
+    
+    // Screen Boundaries
+    if(x < 0) { x = 0; vx = -vx; bounced = true; }
+    if(x > 2047) { x = 2047; vx = -vx; bounced = true; }
+    if(y < 0) { y = 0; vy = -vy; bounced = true; }
+    if(y > 2047) { y = 2047; vy = -vy; bounced = true; }
+    
+    // Map Walls (Type 0)
+    for(int i=0; i<TANK_MAP_SIZE; i++) {
+        if(tank_map[i].type == 0) { // Wall
+            if(x >= tank_map[i].x && x <= tank_map[i].x + tank_map[i].w &&
+               y >= tank_map[i].y && y <= tank_map[i].y + tank_map[i].h) {
+                
+                // Determine side of collision to reflect correctly
+                // Previous position was (x-vx, y-vy)
+                float prev_x = x - vx;
+                float prev_y = y - vy;
+                
+                // Check if we were outside in X
+                bool outside_x = (prev_x < tank_map[i].x || prev_x > tank_map[i].x + tank_map[i].w);
+                // Check if we were outside in Y
+                bool outside_y = (prev_y < tank_map[i].y || prev_y > tank_map[i].y + tank_map[i].h);
+                
+                if(outside_x) vx = -vx;
+                if(outside_y) vy = -vy;
+                
+                // Push out slightly to prevent sticking
+                x += vx; 
+                y += vy;
+                
+                bounced = true;
+            }
+        }
+    }
+    
+    if(bounced) {
+        bounce_count++;
+    }
+    
+    return bounced;
+}
+
+void Generate_Random_Map(uint32_t seed) {
+    srand(seed);
+    for(int i=0; i<TANK_MAP_SIZE; i++) {
+        // Randomize type (0 or 1)
+        tank_map[i].type = rand() % 2;
+        
+        // Randomize Position (Keep away from extreme corners to allow spawn)
+        // Screen 0-2047.
+        // Walls/Water size ~100-400.
+        tank_map[i].w = 100 + (rand() % 300);
+        tank_map[i].h = 100 + (rand() % 300);
+        
+        // Ensure they are somewhat central or scattered
+        tank_map[i].x = 200 + (rand() % 1600);
+        tank_map[i].y = 200 + (rand() % 1600);
+    }
+}
+
+void Init_Tank_Game(uint32_t seed, bool is_initiator) {
     // Check Connection
     if(Network_Manager::getState() != NET_CONNECTED && Network_Manager::getState() != NET_IN_GAME) {
         tank_game_over = 2; // Not Connected
@@ -661,14 +754,39 @@ void Init_Tank_Game(void) {
     }
 
     // If we are the initiator (not already in game), send Start Game
-    if(Network_Manager::getState() == NET_CONNECTED) {
-        Network_Manager::startGame(1); // 1 = Tank
+    if(is_initiator) {
+        if(seed == 0) seed = millis();
+        Network_Manager::startGame(1, seed); 
+    }
+    
+    Generate_Random_Map(seed);
+
+    // Spawn Points
+    if(is_initiator) {
+        my_tank.x = 200;
+        my_tank.y = 200;
+        my_tank.angle = -1.5707f; // Face Up
+    } else {
+        my_tank.x = 1800;
+        my_tank.y = 1800;
+        my_tank.angle = 1.5707f; // Face Down
+    }
+    
+    // Check Spawn Validity (Micro-move)
+    int attempts = 0;
+    while(Check_Tank_Collision(my_tank.x, my_tank.y) && attempts < 100) {
+        my_tank.x += (rand() % 200) - 100;
+        my_tank.y += (rand() % 200) - 100;
+        
+        // Keep in bounds
+        if(my_tank.x < 50) my_tank.x = 50;
+        if(my_tank.x > 1997) my_tank.x = 1997;
+        if(my_tank.y < 50) my_tank.y = 50;
+        if(my_tank.y > 1997) my_tank.y = 1997;
+        
+        attempts++;
     }
 
-    my_tank.x = 1024;
-    my_tank.y = 1024;
-    my_tank.angle = -1.5707f; // Face Up (-PI/2)
-    
     for(int i=0; i<TANK_MAX_BULLETS; i++) {
         tank_bullets[i].active = false;
     }
@@ -680,8 +798,13 @@ void Update_Tank_Game(void) {
     if(tank_game_over) return;
 
     // Check Remote Exit
-    if(Network_Manager::isRemoteGameEnded()) {
-        tank_game_over = 3; // Remote Disconnected
+    uint8_t reason;
+    if(Network_Manager::isRemoteGameEnded(&reason)) {
+        if(reason == 1) {
+             tank_game_over = 4; // You Win (Opponent Died)
+        } else {
+             tank_game_over = 3; // Opponent Left
+        }
         return;
     }
 
@@ -710,26 +833,30 @@ void Update_Tank_Game(void) {
     
     // Update Tank
     my_tank.angle += turn;
-    my_tank.x += speed * cos(my_tank.angle);
-    my_tank.y += speed * sin(my_tank.angle);
+    float next_x = my_tank.x + speed * cos(my_tank.angle);
+    float next_y = my_tank.y + speed * sin(my_tank.angle);
     
-    // Boundary
-    if(my_tank.x < 50) my_tank.x = 50;
-    if(my_tank.x > 1997) my_tank.x = 1997;
-    if(my_tank.y < 50) my_tank.y = 50;
-    if(my_tank.y > 1997) my_tank.y = 1997;
+    // Check Collision (Map & Boundary)
+    if(next_x >= 50 && next_x <= 1997 && next_y >= 50 && next_y <= 1997 && !Check_Tank_Collision(next_x, next_y)) {
+        my_tank.x = next_x;
+        my_tank.y = next_y;
+    }
     
+    static int bullet_frames[TANK_MAX_BULLETS];
+
     // Fire (Pressed = LOW)
     if(btn_a == LOW && millis() - last_fire_time > 250) { 
         last_fire_time = millis();
         for(int i=0; i<TANK_MAX_BULLETS; i++) {
             if(!tank_bullets[i].active) {
                 tank_bullets[i].active = true;
-                // Spawn at tip of barrel (approx 40 units)
-                tank_bullets[i].x = my_tank.x + 40 * cos(my_tank.angle); 
-                tank_bullets[i].y = my_tank.y + 40 * sin(my_tank.angle);
+                // Spawn at tip of barrel (approx 100 units)
+                tank_bullets[i].x = my_tank.x + 100 * cos(my_tank.angle); 
+                tank_bullets[i].y = my_tank.y + 100 * sin(my_tank.angle);
                 tank_bullets[i].vx = TANK_BULLET_SPEED * cos(my_tank.angle);
                 tank_bullets[i].vy = TANK_BULLET_SPEED * sin(my_tank.angle);
+                tank_bullets[i].bounce_count = 0;
+                bullet_frames[i] = 0;
                 break;
             }
         }
@@ -741,11 +868,41 @@ void Update_Tank_Game(void) {
             tank_bullets[i].x += tank_bullets[i].vx;
             tank_bullets[i].y += tank_bullets[i].vy;
             
-            if(tank_bullets[i].x < 0 || tank_bullets[i].x > 2047 ||
-               tank_bullets[i].y < 0 || tank_bullets[i].y > 2047) {
+            // Check Collision (Bounce)
+            Check_Bullet_Collision(tank_bullets[i].x, tank_bullets[i].y, tank_bullets[i].vx, tank_bullets[i].vy, tank_bullets[i].bounce_count);
+            
+            if(tank_bullets[i].bounce_count > 5) {
                 tank_bullets[i].active = false;
             }
+
+            bullet_frames[i]++;
+            if(bullet_frames[i] > 300) { // 12 seconds life
+                tank_bullets[i].active = false;
+            }
+            
+            // Check Self Hit (Suicide)
+            float dx = tank_bullets[i].x - my_tank.x;
+            float dy = tank_bullets[i].y - my_tank.y;
+            if(dx*dx + dy*dy < 60*60) { // Tank Radius approx 60 (Increased from 30)
+                tank_game_over = 1; // I died
+            }
         }
+    }
+    
+    // Check Remote Bullets Hit Me
+    TankData remoteData;
+    if(Network_Manager::getRemoteGameData(&remoteData)) {
+        for(int i=0; i<remoteData.bullet_count; i++) {
+             float dx = remoteData.bullets[i].x - my_tank.x;
+             float dy = remoteData.bullets[i].y - my_tank.y;
+             if(dx*dx + dy*dy < 60*60) { // Tank Radius approx 60 (Increased from 30)
+                 tank_game_over = 1; // I died
+             }
+        }
+    }
+    
+    if(tank_game_over == 1) {
+        Network_Manager::endGame(1); // Notify peer I lost (Reason 1 = Died)
     }
 
     // Network Sync (100Hz approx, called every frame which is 25Hz in main loop, but we want faster?)
@@ -1030,11 +1187,12 @@ static void guiTask(void* pvParameters) {
 
         // Global Game Request Check (for non-blocking states)
         uint8_t reqGameId;
-        if(Network_Manager::hasGameRequest(&reqGameId)) {
+        uint32_t reqSeed;
+        if(Network_Manager::hasGameRequest(&reqGameId, &reqSeed)) {
             Network_Manager::clearGameRequest();
             if(reqGameId == 1) { // Tank
                 ui_state = UI_TANK;
-                Init_Tank_Game();
+                Init_Tank_Game(reqSeed, false); // Responder
                 rebuild = true;
             }
         }
@@ -1133,7 +1291,7 @@ static void guiTask(void* pvParameters) {
                     continue;
                 } else if (menu_index == 5) {
                     ui_state = UI_TANK;
-                    Init_Tank_Game();
+                    Init_Tank_Game(0, true); // Initiator, Seed=0 (Auto)
                     continue;
                 } else if (menu_index == 6) {
                     ui_state = UI_MENU_MAIN;
@@ -1149,8 +1307,8 @@ static void guiTask(void* pvParameters) {
                 DRAW_Clear();
                 DRAW_AddRect(0, 0, 2047, 2047); 
                 
-                int start_y = 1600; 
-                int spacing = 400;
+                int start_y = 1800; 
+                int spacing = 250;
                 int scale = 40; 
                 
                 for (int i = 0; i < games_menu_count; i++) {
@@ -1265,12 +1423,13 @@ static void guiTask(void* pvParameters) {
             while (is_playing && audioFile) {
                 // Check for Game Request
                 uint8_t reqGameId;
-                if(Network_Manager::hasGameRequest(&reqGameId)) {
+                uint32_t reqSeed;
+                if(Network_Manager::hasGameRequest(&reqGameId, &reqSeed)) {
                     Network_Manager::clearGameRequest();
                     if(reqGameId == 1) { // Tank
                         Stop_Music();
                         ui_state = UI_TANK;
-                        Init_Tank_Game();
+                        Init_Tank_Game(reqSeed, false);
                         rebuild = true;
                         break;
                     }
@@ -1512,12 +1671,13 @@ static void guiTask(void* pvParameters) {
             while (is_video_playing && videoFile) {
                 // Check for Game Request
                 uint8_t reqGameId;
-                if(Network_Manager::hasGameRequest(&reqGameId)) {
+                uint32_t reqSeed;
+                if(Network_Manager::hasGameRequest(&reqGameId, &reqSeed)) {
                     Network_Manager::clearGameRequest();
                     if(reqGameId == 1) { // Tank
                         Stop_Video();
                         ui_state = UI_TANK;
-                        Init_Tank_Game();
+                        Init_Tank_Game(reqSeed, false);
                         rebuild = true;
                         break;
                     }
@@ -2016,7 +2176,7 @@ static void guiTask(void* pvParameters) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
                 last_menu_index = -1;
-                Network_Manager::endGame();
+                Network_Manager::endGame(0); // Reason 0 = Quit
                 continue;
             }
             
@@ -2024,6 +2184,21 @@ static void guiTask(void* pvParameters) {
             
             DRAW_Clear();
             DRAW_AddRect(0, 0, 2047, 2047);
+            
+            // Draw Map
+            for(int i=0; i<TANK_MAP_SIZE; i++) {
+                if(tank_map[i].type == 0) { // Wall
+                    DRAW_AddRect(tank_map[i].x, tank_map[i].y, tank_map[i].w, tank_map[i].h);
+                    // Cross hatch for wall
+                    DRAW_AddLine(tank_map[i].x, tank_map[i].y, tank_map[i].x + tank_map[i].w, tank_map[i].y + tank_map[i].h);
+                    DRAW_AddLine(tank_map[i].x, tank_map[i].y + tank_map[i].h, tank_map[i].x + tank_map[i].w, tank_map[i].y);
+                } else { // Water
+                    DRAW_AddRect(tank_map[i].x, tank_map[i].y, tank_map[i].w, tank_map[i].h);
+                    // Waves for water
+                    int y_mid = tank_map[i].y + tank_map[i].h/2;
+                    DRAW_AddLine(tank_map[i].x, y_mid, tank_map[i].x + tank_map[i].w, y_mid);
+                }
+            }
             
             // Draw Tank
             // Body (Rect rotated)
@@ -2067,7 +2242,7 @@ static void guiTask(void* pvParameters) {
             DRAW_AddLine(rotX(tx4, ty4), rotY(tx4, ty4), rotX(tx1, ty1), rotY(tx1, ty1));
             
             // Barrel (Line)
-            DRAW_AddLine(my_tank.x, my_tank.y, my_tank.x + 60*cos_a, my_tank.y + 60*sin_a);
+            DRAW_AddLine(my_tank.x, my_tank.y, my_tank.x + 100*cos_a, my_tank.y + 100*sin_a);
             
             // Draw Bullets
             for(int i=0; i<TANK_MAX_BULLETS; i++) {
@@ -2103,7 +2278,7 @@ static void guiTask(void* pvParameters) {
                 DRAW_AddLine(rRotX(tx4, ty4), rRotY(tx4, ty4), rRotX(tx1, ty1), rRotY(tx1, ty1));
                 
                 // Remote Barrel
-                DRAW_AddLine(remoteData.x, remoteData.y, remoteData.x + 60*r_cos, remoteData.y + 60*r_sin);
+                DRAW_AddLine(remoteData.x, remoteData.y, remoteData.x + 100*r_cos, remoteData.y + 100*r_sin);
                 
                 // Remote Bullets
                 for(int i=0; i<remoteData.bullet_count; i++) {
@@ -2112,10 +2287,14 @@ static void guiTask(void* pvParameters) {
             }
             
             if(tank_game_over) {
-                if(tank_game_over == 2) {
+                if(tank_game_over == 1) {
+                    DRAW_AddString("YOU LOSE", 0, 600, 1100, 20, 20);
+                } else if(tank_game_over == 2) {
                     DRAW_AddString("NOT CONNECTED", 0, 400, 1100, 20, 20);
                 } else if(tank_game_over == 3) {
                     DRAW_AddString("OPPONENT LEFT", 0, 400, 1100, 20, 20);
+                } else if(tank_game_over == 4) {
+                    DRAW_AddString("YOU WIN", 0, 600, 1100, 20, 20);
                 }
                 
                 // Auto exit after 2 seconds
@@ -2126,7 +2305,7 @@ static void guiTask(void* pvParameters) {
                     rebuild = true;
                     last_menu_index = -1;
                     exit_timer = 0;
-                    Network_Manager::endGame();
+                    Network_Manager::endGame(0);
                 }
             }
 

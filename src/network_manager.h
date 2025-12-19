@@ -33,7 +33,13 @@ typedef struct {
     union {
         uint8_t padding[8];
         TankData tank_data;
-        uint8_t game_id; // 1 = Tank
+        struct {
+            uint8_t game_id;
+            uint32_t seed;
+        } start_req;
+        struct {
+            uint8_t reason; // 0: Quit, 1: Died
+        } end_req;
     } payload;
 } NetMessage;
 
@@ -62,14 +68,14 @@ public:
     static void disconnect();
     
     // Game Methods
-    static void startGame(uint8_t gameId);
+    static void startGame(uint8_t gameId, uint32_t seed);
     static void sendGameData(const TankData& data);
-    static void endGame();
+    static void endGame(uint8_t reason);
     
-    static bool hasGameRequest(uint8_t* gameIdOut);
+    static bool hasGameRequest(uint8_t* gameIdOut, uint32_t* seedOut);
     static void clearGameRequest();
     static bool getRemoteGameData(TankData* dataOut);
-    static bool isRemoteGameEnded();
+    static bool isRemoteGameEnded(uint8_t* reasonOut);
     static void clearRemoteGameEnded();
 
     static NetState getState();
