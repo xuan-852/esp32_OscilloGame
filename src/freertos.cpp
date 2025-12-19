@@ -155,6 +155,28 @@ static RunObstacle run_obstacles[RUN_MAX_OBSTACLES];
 static int run_score = 0;
 static int run_game_over = 0;
 
+// --- Tank Game Variables ---
+#define TANK_MAX_BULLETS 5
+#define TANK_SPEED 15.0f
+#define TANK_TURN_SPEED 0.15f
+#define TANK_BULLET_SPEED 30.0f
+
+typedef struct {
+    float x, y;
+    float angle; // Radians
+} Tank;
+
+typedef struct {
+    float x, y;
+    float vx, vy;
+    bool active;
+} Bullet;
+
+static Tank my_tank;
+static Bullet tank_bullets[TANK_MAX_BULLETS];
+static int tank_game_over = 0;
+static unsigned long last_fire_time = 0;
+
 // Touch Pins
 #define TOUCH_UP    4
 #define TOUCH_DOWN  6
@@ -214,6 +236,7 @@ enum UI_State {
     UI_FLAPPY,
     UI_RACING,
     UI_RUNTINY,
+    UI_TANK, // New Tank Game
     UI_ABOUT
 };
 
@@ -233,9 +256,10 @@ static const char* games_menu_items[] = {
     "Flappy",
     "Racing",
     "RunTiny",
+    "Tank", // New Game
     "Back"
 };
-static const int games_menu_count = 6;
+static const int games_menu_count = 7;
 
 // --- Snake Game Logic ---
 void Init_Snake_Game(void) {
@@ -628,6 +652,121 @@ void Update_RunTiny_Game(int jump_requested) {
     }
 }
 
+// --- Tank Game Logic ---
+void Init_Tank_Game(void) {
+    // Check Connection
+    if(Network_Manager::getState() != NET_CONNECTED && Network_Manager::getState() != NET_IN_GAME) {
+        tank_game_over = 2; // Not Connected
+        return;
+    }
+
+    // If we are the initiator (not already in game), send Start Game
+    if(Network_Manager::getState() == NET_CONNECTED) {
+        Network_Manager::startGame(1); // 1 = Tank
+    }
+
+    my_tank.x = 1024;
+    my_tank.y = 1024;
+    my_tank.angle = -1.5707f; // Face Up (-PI/2)
+    
+    for(int i=0; i<TANK_MAX_BULLETS; i++) {
+        tank_bullets[i].active = false;
+    }
+    tank_game_over = 0;
+    Network_Manager::clearRemoteGameEnded();
+}
+
+void Update_Tank_Game(void) {
+    if(tank_game_over) return;
+
+    // Check Remote Exit
+    if(Network_Manager::isRemoteGameEnded()) {
+        tank_game_over = 3; // Remote Disconnected
+        return;
+    }
+
+    // Inputs
+    // Left Stick Y (JOY1_Y) - Forward/Back
+    // Right Stick X (JOY2_X) - Rotate
+    // Button A (JOY_A) - Fire
+    
+    int joy1_y = analogRead(JOY1_Y); // 0-4095
+    int joy2_x = analogRead(JOY2_X); // 0-4095
+    int btn_a = !digitalRead(JOY_A);  // Released = 1 (HIGH), Pressed = 0 (LOW)
+    
+    // Deadzone & Mapping
+    float speed = 0;
+    if(abs(joy1_y - 2048) > 300) {
+        // Assuming Up (Low val) -> Forward
+        // 2048 - val: Positive if val < 2048 (Up)
+        speed = (2048 - joy1_y) / 2048.0f * TANK_SPEED;
+    }
+    
+    float turn = 0;
+    if(abs(joy2_x - 2048) > 300) {
+        // Assuming Right (High val) -> Clockwise
+        turn = (joy2_x - 2048) / 2048.0f * TANK_TURN_SPEED;
+    }
+    
+    // Update Tank
+    my_tank.angle += turn;
+    my_tank.x += speed * cos(my_tank.angle);
+    my_tank.y += speed * sin(my_tank.angle);
+    
+    // Boundary
+    if(my_tank.x < 50) my_tank.x = 50;
+    if(my_tank.x > 1997) my_tank.x = 1997;
+    if(my_tank.y < 50) my_tank.y = 50;
+    if(my_tank.y > 1997) my_tank.y = 1997;
+    
+    // Fire (Pressed = LOW)
+    if(btn_a == LOW && millis() - last_fire_time > 250) { 
+        last_fire_time = millis();
+        for(int i=0; i<TANK_MAX_BULLETS; i++) {
+            if(!tank_bullets[i].active) {
+                tank_bullets[i].active = true;
+                // Spawn at tip of barrel (approx 40 units)
+                tank_bullets[i].x = my_tank.x + 40 * cos(my_tank.angle); 
+                tank_bullets[i].y = my_tank.y + 40 * sin(my_tank.angle);
+                tank_bullets[i].vx = TANK_BULLET_SPEED * cos(my_tank.angle);
+                tank_bullets[i].vy = TANK_BULLET_SPEED * sin(my_tank.angle);
+                break;
+            }
+        }
+    }
+    
+    // Update Bullets
+    for(int i=0; i<TANK_MAX_BULLETS; i++) {
+        if(tank_bullets[i].active) {
+            tank_bullets[i].x += tank_bullets[i].vx;
+            tank_bullets[i].y += tank_bullets[i].vy;
+            
+            if(tank_bullets[i].x < 0 || tank_bullets[i].x > 2047 ||
+               tank_bullets[i].y < 0 || tank_bullets[i].y > 2047) {
+                tank_bullets[i].active = false;
+            }
+        }
+    }
+
+    // Network Sync (100Hz approx, called every frame which is 25Hz in main loop, but we want faster?)
+    // Main loop delay is 40ms (25Hz). We should send every frame.
+    TankData data;
+    data.x = my_tank.x;
+    data.y = my_tank.y;
+    data.angle = my_tank.angle;
+    data.bullet_count = 0;
+    for(int i=0; i<TANK_MAX_BULLETS; i++) {
+        if(tank_bullets[i].active) {
+            if(data.bullet_count < 5) {
+                data.bullets[data.bullet_count].x = tank_bullets[i].x;
+                data.bullets[data.bullet_count].y = tank_bullets[i].y;
+                data.bullet_count++;
+            }
+        }
+    }
+    Network_Manager::sendGameData(data);
+}
+
 // --- Music Logic ---
 void Scan_Music_Files() {
     music_files.clear();
@@ -889,6 +1028,17 @@ static void guiTask(void* pvParameters) {
         // 2. State Machine
         bool rebuild = false;
 
+        // Global Game Request Check (for non-blocking states)
+        uint8_t reqGameId;
+        if(Network_Manager::hasGameRequest(&reqGameId)) {
+            Network_Manager::clearGameRequest();
+            if(reqGameId == 1) { // Tank
+                ui_state = UI_TANK;
+                Init_Tank_Game();
+                rebuild = true;
+            }
+        }
+
         if (ui_state == UI_MENU_MAIN) {
             // Navigation
             if (enc_delta != 0) {
@@ -982,6 +1132,10 @@ static void guiTask(void* pvParameters) {
                     Init_RunTiny_Game();
                     continue;
                 } else if (menu_index == 5) {
+                    ui_state = UI_TANK;
+                    Init_Tank_Game();
+                    continue;
+                } else if (menu_index == 6) {
                     ui_state = UI_MENU_MAIN;
                     menu_index = 1; // Return to "Games" selection
                     last_menu_index = -1;
@@ -1109,6 +1263,19 @@ static void guiTask(void* pvParameters) {
             int32_t last_enc = encoderValue;
             
             while (is_playing && audioFile) {
+                // Check for Game Request
+                uint8_t reqGameId;
+                if(Network_Manager::hasGameRequest(&reqGameId)) {
+                    Network_Manager::clearGameRequest();
+                    if(reqGameId == 1) { // Tank
+                        Stop_Music();
+                        ui_state = UI_TANK;
+                        Init_Tank_Game();
+                        rebuild = true;
+                        break;
+                    }
+                }
+
                 // Update Volume
                 int32_t curr_enc = encoderValue;
                 int delta = (curr_enc - last_enc) / 4; // Sensitivity: 4 encoder counts (1 detent) = 1 volume step
@@ -1343,6 +1510,19 @@ static void guiTask(void* pvParameters) {
             int32_t last_enc = encoderValue;
             
             while (is_video_playing && videoFile) {
+                // Check for Game Request
+                uint8_t reqGameId;
+                if(Network_Manager::hasGameRequest(&reqGameId)) {
+                    Network_Manager::clearGameRequest();
+                    if(reqGameId == 1) { // Tank
+                        Stop_Video();
+                        ui_state = UI_TANK;
+                        Init_Tank_Game();
+                        rebuild = true;
+                        break;
+                    }
+                }
+
                 // Update Volume
                 int32_t curr_enc = encoderValue;
                 int delta = (curr_enc - last_enc) / 4; 
@@ -1828,6 +2008,126 @@ static void guiTask(void* pvParameters) {
                 char score_str[16];
                 sprintf(score_str, "%d", run_score);
                 DRAW_AddString(score_str, 0, 50, 1900, 20, 20);
+            }
+
+        } else if (ui_state == UI_TANK) {
+            // Exit
+            if (btn_pressed) {
+                ui_state = UI_MENU_GAMES;
+                rebuild = true;
+                last_menu_index = -1;
+                Network_Manager::endGame();
+                continue;
+            }
+            
+            Update_Tank_Game();
+            
+            DRAW_Clear();
+            DRAW_AddRect(0, 0, 2047, 2047);
+            
+            // Draw Tank
+            // Body (Rect rotated)
+            float cos_a = cos(my_tank.angle);
+            float sin_a = sin(my_tank.angle);
+            
+            // Tank Dimensions
+            float w = 60;
+            float h = 80;
+            
+            // 4 Corners relative to center
+            float x1 = -w/2, y1 = -h/2;
+            float x2 = w/2, y2 = -h/2;
+            float x3 = w/2, y3 = h/2;
+            float x4 = -w/2, y4 = h/2;
+            
+            // Rotate and Translate
+            auto rotX = [&](float x, float y) { return my_tank.x + x*cos_a - y*sin_a; };
+            auto rotY = [&](float x, float y) { return my_tank.y + x*sin_a + y*cos_a; };
+            
+            float rx1 = rotX(x1, y1), ry1 = rotY(x1, y1);
+            float rx2 = rotX(x2, y2), ry2 = rotY(x2, y2);
+            float rx3 = rotX(x3, y3), ry3 = rotY(x3, y3);
+            float rx4 = rotX(x4, y4), ry4 = rotY(x4, y4);
+            
+            DRAW_AddLine(rx1, ry1, rx2, ry2);
+            DRAW_AddLine(rx2, ry2, rx3, ry3);
+            DRAW_AddLine(rx3, ry3, rx4, ry4);
+            DRAW_AddLine(rx4, ry4, rx1, ry1);
+            
+            // Turret (Box)
+            float tw = 30, th = 30;
+            float tx1 = -tw/2, ty1 = -th/2;
+            float tx2 = tw/2, ty2 = -th/2;
+            float tx3 = tw/2, ty3 = th/2;
+            float tx4 = -tw/2, ty4 = th/2;
+            
+            DRAW_AddLine(rotX(tx1, ty1), rotY(tx1, ty1), rotX(tx2, ty2), rotY(tx2, ty2));
+            DRAW_AddLine(rotX(tx2, ty2), rotY(tx2, ty2), rotX(tx3, ty3), rotY(tx3, ty3));
+            DRAW_AddLine(rotX(tx3, ty3), rotY(tx3, ty3), rotX(tx4, ty4), rotY(tx4, ty4));
+            DRAW_AddLine(rotX(tx4, ty4), rotY(tx4, ty4), rotX(tx1, ty1), rotY(tx1, ty1));
+            
+            // Barrel (Line)
+            DRAW_AddLine(my_tank.x, my_tank.y, my_tank.x + 60*cos_a, my_tank.y + 60*sin_a);
+            
+            // Draw Bullets
+            for(int i=0; i<TANK_MAX_BULLETS; i++) {
+                if(tank_bullets[i].active) {
+                    DRAW_AddCircle(tank_bullets[i].x, tank_bullets[i].y, 5);
+                }
+            }
+
+            // Draw Remote Tank
+            TankData remoteData;
+            if(Network_Manager::getRemoteGameData(&remoteData)) {
+                float r_cos = cos(remoteData.angle);
+                float r_sin = sin(remoteData.angle);
+                
+                // Remote Tank Body
+                auto rRotX = [&](float x, float y) { return remoteData.x + x*r_cos - y*r_sin; };
+                auto rRotY = [&](float x, float y) { return remoteData.y + x*r_sin + y*r_cos; };
+                
+                float rx1 = rRotX(x1, y1), ry1 = rRotY(x1, y1);
+                float rx2 = rRotX(x2, y2), ry2 = rRotY(x2, y2);
+                float rx3 = rRotX(x3, y3), ry3 = rRotY(x3, y3);
+                float rx4 = rRotX(x4, y4), ry4 = rRotY(x4, y4);
+                
+                DRAW_AddLine(rx1, ry1, rx2, ry2);
+                DRAW_AddLine(rx2, ry2, rx3, ry3);
+                DRAW_AddLine(rx3, ry3, rx4, ry4);
+                DRAW_AddLine(rx4, ry4, rx1, ry1);
+                
+                // Remote Turret
+                DRAW_AddLine(rRotX(tx1, ty1), rRotY(tx1, ty1), rRotX(tx2, ty2), rRotY(tx2, ty2));
+                DRAW_AddLine(rRotX(tx2, ty2), rRotY(tx2, ty2), rRotX(tx3, ty3), rRotY(tx3, ty3));
+                DRAW_AddLine(rRotX(tx3, ty3), rRotY(tx3, ty3), rRotX(tx4, ty4), rRotY(tx4, ty4));
+                DRAW_AddLine(rRotX(tx4, ty4), rRotY(tx4, ty4), rRotX(tx1, ty1), rRotY(tx1, ty1));
+                
+                // Remote Barrel
+                DRAW_AddLine(remoteData.x, remoteData.y, remoteData.x + 60*r_cos, remoteData.y + 60*r_sin);
+                
+                // Remote Bullets
+                for(int i=0; i<remoteData.bullet_count; i++) {
+                    DRAW_AddCircle(remoteData.bullets[i].x, remoteData.bullets[i].y, 5);
+                }
+            }
+            
+            if(tank_game_over) {
+                if(tank_game_over == 2) {
+                    DRAW_AddString("NOT CONNECTED", 0, 400, 1100, 20, 20);
+                } else if(tank_game_over == 3) {
+                    DRAW_AddString("OPPONENT LEFT", 0, 400, 1100, 20, 20);
+                }
+                
+                // Auto exit after 2 seconds
+                static unsigned long exit_timer = 0;
+                if(exit_timer == 0) exit_timer = millis();
+                if(millis() - exit_timer > 2000) {
+                    ui_state = UI_MENU_GAMES;
+                    rebuild = true;
+                    last_menu_index = -1;
+                    exit_timer = 0;
+                    Network_Manager::endGame();
+                }
             }
 
         } else if (ui_state == UI_ABOUT) {

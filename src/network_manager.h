@@ -10,7 +10,19 @@ enum NetMsgType {
     MSG_PAIR_ACCEPT,
     MSG_PAIR_REJECT,
     MSG_DISCONNECT,
-    MSG_DATA // For game data later
+    MSG_DATA,
+    MSG_START_GAME,
+    MSG_GAME_DATA,
+    MSG_END_GAME
+};
+
+// Game Data Structure
+struct TankData {
+    float x, y, angle;
+    uint8_t bullet_count;
+    struct {
+        float x, y;
+    } bullets[5];
 };
 
 // Fixed size packet for simplicity
@@ -18,7 +30,11 @@ typedef struct {
     uint8_t type;
     uint8_t src_mac[6];
     char name[16]; // "Player_XXXX"
-    uint8_t padding[8]; 
+    union {
+        uint8_t padding[8];
+        TankData tank_data;
+        uint8_t game_id; // 1 = Tank
+    } payload;
 } NetMessage;
 
 // Peer Info
@@ -32,7 +48,8 @@ enum NetState {
     NET_IDLE,
     NET_DISCOVERING,
     NET_PAIRING,
-    NET_CONNECTED
+    NET_CONNECTED,
+    NET_IN_GAME
 };
 
 class Network_Manager {
@@ -43,6 +60,17 @@ public:
     static void stopDiscovery();
     static void pair(const uint8_t* target_mac);
     static void disconnect();
+    
+    // Game Methods
+    static void startGame(uint8_t gameId);
+    static void sendGameData(const TankData& data);
+    static void endGame();
+    
+    static bool hasGameRequest(uint8_t* gameIdOut);
+    static void clearGameRequest();
+    static bool getRemoteGameData(TankData* dataOut);
+    static bool isRemoteGameEnded();
+    static void clearRemoteGameEnded();
 
     static NetState getState();
     static int getPeerCount();
