@@ -83,7 +83,7 @@ void handleEnter() {
 }
 
 void webServerTask(void* pvParameters) {
-  WiFi.softAP("ESP32_Game_Controller#2", "12345678");
+  WiFi.softAP("ESP32_Game_Controller#1", "12345678");
   IPAddress myIP = WiFi.softAPIP();
   Serial.print("AP IP address: ");
   Serial.println(myIP);

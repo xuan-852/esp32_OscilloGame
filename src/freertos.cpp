@@ -13,11 +13,6 @@
 // External variables from main.cpp
 extern volatile int32_t encoderValue;
 
-// Web Control Globals
-volatile int web_enc_delta = 0;
-volatile bool web_btn_pressed = false;
-volatile int web_game_dir = -1;
-
 // Task Handles
 static TaskHandle_t s_serialOutputTaskHandle = nullptr;
 static TaskHandle_t s_guiTaskHandle = nullptr;
@@ -1097,7 +1092,7 @@ static void guiTask(void* pvParameters) {
             }
 
             // Volume Control Init
-            static int volume = 128; // 0-256. Default 50%
+            static int volume = 1; // 0-256. Default 1/256
             int32_t last_enc = encoderValue;
             
             while (is_playing && audioFile) {
@@ -1201,6 +1196,16 @@ static void guiTask(void* pvParameters) {
                 }
                 
                 // 3. Check Exit Button (Polling)
+                // Check Web Exit
+                if (web_btn_pressed) {
+                    web_btn_pressed = false;
+                    Stop_Music();
+                    ui_state = UI_MENU_MUSIC;
+                    rebuild = true;
+                    last_menu_index = -1;
+                    break;
+                }
+
                 // Require Stable LOW
                 if (digitalRead(EN_S) == LOW) {
                     if (low_start == 0) low_start = millis();
@@ -1321,7 +1326,7 @@ static void guiTask(void* pvParameters) {
             }
 
             // Volume Control Init (Only for Audio Channels)
-            static int volume = 128; 
+            static int volume = 1; 
             int32_t last_enc = encoderValue;
             
             while (is_video_playing && videoFile) {
@@ -1422,6 +1427,16 @@ static void guiTask(void* pvParameters) {
                 }
                 
                 // 3. Check Exit Button
+                // Check Web Exit
+                if (web_btn_pressed) {
+                    web_btn_pressed = false;
+                    Stop_Video();
+                    ui_state = UI_MENU_VIDEO;
+                    rebuild = true;
+                    last_menu_index = -1;
+                    break;
+                }
+
                 if (digitalRead(EN_S) == LOW) {
                     if (low_start == 0) low_start = millis();
                     if (millis() - low_start > 50) { 
@@ -1555,6 +1570,13 @@ static void guiTask(void* pvParameters) {
             // Input
             bool current_touch_up = (touchRead(TOUCH_UP) > touch_base_up + TOUCH_DELTA);
             int jump = 0;
+            
+            // Web Input
+            if (web_game_dir == 0) {
+                jump = 1;
+                web_game_dir = -1;
+            }
+
             if (current_touch_up && !last_touch_up) {
                 jump = 1;
             }
@@ -1660,6 +1682,13 @@ static void guiTask(void* pvParameters) {
             // Input
             bool current_touch_up = (touchRead(TOUCH_UP) > touch_base_up + TOUCH_DELTA);
             int jump = 0;
+            
+            // Web Input
+            if (web_game_dir == 0) {
+                jump = 1;
+                web_game_dir = -1;
+            }
+
             if (current_touch_up && !last_touch_up) {
                 jump = 1;
             }

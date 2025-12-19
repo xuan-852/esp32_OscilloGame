@@ -26,8 +26,12 @@ uint32_t ldacMask;
 
 volatile uint16_t *bufA_L = NULL;
 volatile uint16_t *bufA_R = NULL;
+volatile uint16_t *bufA_X = NULL;
+volatile uint16_t *bufA_Y = NULL;
 volatile uint16_t *bufB_L = NULL;
 volatile uint16_t *bufB_R = NULL;
+volatile uint16_t *bufB_X = NULL;
+volatile uint16_t *bufB_Y = NULL;
 
 volatile bool bufA_ready = false; // True if A has data to play
 volatile bool bufB_ready = false; // True if B has data to play
@@ -37,16 +41,21 @@ volatile int bufB_count = 0;
 volatile bool playing_A = true; // True if currently playing A, False if B
 volatile int play_idx = 0;
 
-volatile bool audio_mode = false;
+volatile int player_mode = 0; // 0: Vector, 1: Audio, 2: Video
 
 void Init_Audio_Buffers() {
     if(bufA_L == NULL) {
         bufA_L = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
         bufA_R = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
+        bufA_X = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
+        bufA_Y = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
+        
         bufB_L = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
         bufB_R = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
+        bufB_X = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
+        bufB_Y = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
         
-        if(!bufA_L || !bufA_R || !bufB_L || !bufB_R) {
+        if(!bufA_L || !bufA_R || !bufA_X || !bufA_Y) {
             Serial.println("Failed to allocate PSRAM for Double Buffers!");
         } else {
             Serial.printf("Allocated Double Buffers in PSRAM: %d samples each\n", MAX_SAMPLES_PER_BUF);
@@ -64,8 +73,12 @@ bool Is_Buf_A_Free() { return !bufA_ready; }
 bool Is_Buf_B_Free() { return !bufB_ready; }
 uint16_t* Get_Buf_A_L() { return (uint16_t*)bufA_L; }
 uint16_t* Get_Buf_A_R() { return (uint16_t*)bufA_R; }
+uint16_t* Get_Buf_A_X() { return (uint16_t*)bufA_X; }
+uint16_t* Get_Buf_A_Y() { return (uint16_t*)bufA_Y; }
 uint16_t* Get_Buf_B_L() { return (uint16_t*)bufB_L; }
 uint16_t* Get_Buf_B_R() { return (uint16_t*)bufB_R; }
+uint16_t* Get_Buf_B_X() { return (uint16_t*)bufB_X; }
+uint16_t* Get_Buf_B_Y() { return (uint16_t*)bufB_Y; }
 
 void Mark_Buf_A_Ready(int count) {
     bufA_count = count;
@@ -77,18 +90,17 @@ void Mark_Buf_B_Ready(int count) {
     bufB_ready = true;
 }
 
-void Set_Audio_Mode(bool enable) {
-    // Force recompile
-    audio_mode = enable;
-    if(enable) {
+void Set_Player_Mode(int mode) {
+    player_mode = mode;
+    if(mode > 0) {
         setDACFreq(44100);
-        // Reset playback state when entering audio mode
+        // Reset playback state when entering audio/video mode
         play_idx = 0;
         playing_A = true;
         bufA_ready = false;
         bufB_ready = false;
     } else {
-        setDACFreq(80000); // Restore video freq
+        setDACFreq(80000); // Restore vector freq
     }
 }
 
@@ -112,15 +124,22 @@ void IRAM_ATTR sendDAC(uint8_t configRegister, uint16_t value) {
 }
 
 void IRAM_ATTR onTimer() {
-  if (audio_mode) {
-      uint16_t l = 32768; // Midpoint silence
+  if (player_mode > 0) {
+      // Audio/Video Mode
+      uint16_t l = 32768;
       uint16_t r = 32768;
+      uint16_t x = 32768;
+      uint16_t y = 32768;
       bool has_data = false;
 
       if (playing_A) {
           if (bufA_ready) {
               l = bufA_L[play_idx];
               r = bufA_R[play_idx];
+              if(player_mode == 2) {
+                  x = bufA_X[play_idx];
+                  y = bufA_Y[play_idx];
+              }
               play_idx++;
               has_data = true;
               if (play_idx >= bufA_count) {
@@ -133,6 +152,10 @@ void IRAM_ATTR onTimer() {
           if (bufB_ready) {
               l = bufB_L[play_idx];
               r = bufB_R[play_idx];
+              if(player_mode == 2) {
+                  x = bufB_X[play_idx];
+                  y = bufB_Y[play_idx];
+              }
               play_idx++;
               has_data = true;
               if (play_idx >= bufB_count) {
@@ -144,9 +167,15 @@ void IRAM_ATTR onTimer() {
       }
 
       if (has_data) {
-          // Send to Ch 2 and 3
+          // Send Audio to Ch 2 and 3
           sendDAC(DAC8554_BUFFER_WRITE | (2 << 1), l);
           sendDAC(DAC8554_BUFFER_WRITE | (3 << 1), r);
+          
+          if(player_mode == 2) {
+              // Send Video to Ch 0 and 1
+              sendDAC(DAC8554_BUFFER_WRITE | (0 << 1), x);
+              sendDAC(DAC8554_BUFFER_WRITE | (1 << 1), y);
+          }
           
           // Update
           GPIO.out_w1tc = ldacMask; 
