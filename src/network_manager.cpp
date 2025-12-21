@@ -154,6 +154,21 @@ void Network_Manager::init() {
     esp_now_register_recv_cb(OnDataRecv);
 }
 
+void Network_Manager::disable() {
+    esp_now_deinit();
+    WiFi.mode(WIFI_OFF);
+}
+
+void Network_Manager::enable() {
+    init();
+    // Re-enable AP (Logic duplicated from web_server.cpp)
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    char ssid[32];
+    sprintf(ssid, "ESP32_Game_%02X:%02X", mac[4], mac[5]);
+    WiFi.softAP(ssid, "12345678");
+}
+
 void Network_Manager::update() {
     // Cleanup old peers
     if (current_state == NET_DISCOVERING) {

@@ -9,34 +9,37 @@
 #include <stdio.h>
 #include <vector>
 #include <string>
+#include <BleMouse.h>
+#include <BLEDevice.h>
 
-// External variables from main.cpp
+// 来自 main.cpp 的外部变量
 extern volatile int32_t encoderValue;
 
-// Task Handles
+// 任务句柄
 static TaskHandle_t s_serialOutputTaskHandle = nullptr;
 static TaskHandle_t s_guiTaskHandle = nullptr;
 static TaskHandle_t s_joystickCheckTaskHandle = nullptr;
 
-// --- Joystick Status ---
+// --- 摇杆状态 ---
 static bool is_joystick_connected = true;
+static BleMouse* bleMouse = nullptr;
 
-// --- Music Player Variables ---
+// --- 音乐播放器变量 ---
 static std::vector<std::string> music_files;
 static int music_file_count = 0;
 static bool is_playing = false;
 static File audioFile;
-static uint16_t music_channels = 2; // 1: Mono, 2: Stereo
+static uint16_t music_channels = 2; // 1: 单声道, 2: 立体声
 
-// --- Video Player Variables ---
+// --- 视频播放器变量 ---
 static std::vector<std::string> video_files;
 static int video_file_count = 0;
 static bool is_video_playing = false;
 static File videoFile;
-static uint16_t video_channels = 4; // Should be 4
+static uint16_t video_channels = 4; // 应该是 4
 
 
-// --- Snake Game Defines ---
+// --- 贪吃蛇游戏定义 ---
 #define SNAKE_GRID_SIZE 20
 #define SNAKE_MAX_LEN 100
 typedef struct {
@@ -47,13 +50,13 @@ typedef struct {
 static Point snake_body[SNAKE_MAX_LEN];
 static int snake_len = 3;
 static Point snake_food;
-static int snake_dir = 3; // 0:UP, 1:DOWN, 2:LEFT, 3:RIGHT
+static int snake_dir = 3; // 0:上, 1:下, 2:左, 3:右
 static int game_over = 0;
 static uint32_t last_game_tick = 0;
 static int game_score = 0;
 static int8_t Game_Input_Dir = 3;
 
-// --- Breakout Game Defines ---
+// --- 打砖块游戏定义 ---
 #define BRK_PADDLE_W 400
 #define BRK_PADDLE_H 50
 #define BRK_BALL_R 30
@@ -79,7 +82,7 @@ static int brk_lives = 3;
 static int brk_game_over = 0;
 static int brk_brick_count = 0;
 
-// --- Flappy Game Defines ---
+// --- Flappy 游戏定义 ---
 #define FLP_GRAVITY 2
 #define FLP_JUMP_FORCE 35
 #define FLP_SPEED 15
@@ -97,7 +100,7 @@ typedef struct {
 
 typedef struct {
     int32_t x;
-    int32_t gap_y; // Center of gap
+    int32_t gap_y; // 间隙中心
     int active;
     int passed;
 } FlpObstacle;
@@ -107,7 +110,7 @@ static FlpObstacle flp_obstacles[FLP_MAX_OBSTACLES];
 static int flp_score = 0;
 static int flp_game_over = 0;
 
-// --- Racing Game Defines ---
+// --- 赛车游戏定义 ---
 #define RACE_CAR_W 150
 #define RACE_CAR_H 250
 #define RACE_OBSTACLE_W 150
@@ -130,7 +133,7 @@ static RaceObstacle race_obstacles[RACE_MAX_OBSTACLES];
 static int race_score = 0;
 static int race_game_over = 0;
 
-// --- RunTiny Game Defines ---
+// --- RunTiny 游戏定义 ---
 #define RUN_GROUND_Y 250
 #define RUN_PLAYER_X 400
 #define RUN_PLAYER_W 100
@@ -159,7 +162,7 @@ static RunObstacle run_obstacles[RUN_MAX_OBSTACLES];
 static int run_score = 0;
 static int run_game_over = 0;
 
-// --- Tank Game Variables ---
+// --- 坦克游戏变量 ---
 #define TANK_MAX_BULLETS 5
 #define TANK_SPEED 15.0f
 #define TANK_TURN_SPEED 0.15f
@@ -167,7 +170,7 @@ static int run_game_over = 0;
 
 typedef struct {
     float x, y;
-    float angle; // Radians
+    float angle; // 弧度
 } Tank;
 
 typedef struct {
@@ -182,20 +185,20 @@ static Bullet tank_bullets[TANK_MAX_BULLETS];
 static int tank_game_over = 0;
 static unsigned long last_fire_time = 0;
 
-// Touch Pins
+// 触摸引脚
 #define TOUCH_UP    4
 #define TOUCH_DOWN  6
 #define TOUCH_LEFT  5
 #define TOUCH_RIGHT 7
 #define TOUCH_THRESHOLD 35000 
 
-// Task Functions
+// 任务函数
 static void serialOutputTask(void* pvParameters);
 static void guiTask(void* pvParameters);
 static void joystickCheckTask(void* pvParameters);
 
 void initTasks() {
-  // Create Joystick Check Task
+  // 创建摇杆检查任务
   if (!s_joystickCheckTaskHandle) {
     xTaskCreatePinnedToCore(
       joystickCheckTask,
@@ -204,11 +207,11 @@ void initTasks() {
       nullptr,
       1,
       &s_joystickCheckTaskHandle,
-      1 // Core 1
+      1 // 核心 1
     );
   }
 
-  // Create Serial Output Task
+  // 创建串口输出任务
   if (!s_serialOutputTaskHandle) {
     xTaskCreatePinnedToCore(
       serialOutputTask,
@@ -217,30 +220,30 @@ void initTasks() {
       nullptr,
       1,
       &s_serialOutputTaskHandle,
-      1 // Core 1
+      1 // 核心 1
     );
   }
 
-  // Create GUI Task
+  // 创建 GUI 任务
   if (!s_guiTaskHandle) {
     xTaskCreatePinnedToCore(
       guiTask,
       "GuiTask",
-      4096, // Larger stack for GUI
+      4096, // GUI 需要更大的堆栈
       nullptr,
       1,
       &s_guiTaskHandle,
-      1 // Core 1
+      1 // 核心 1
     );
   }
 
-  // Initialize Web Server on Core 0
+  // 在核心 0 上初始化 Web 服务器
   initWebServer();
 }
 
 #include "network_manager.h"
 
-// --- GUI Logic ---
+// --- GUI 逻辑 ---
 
 enum UI_State {
     UI_MENU_MAIN,
@@ -249,13 +252,14 @@ enum UI_State {
     UI_MUSIC_PLAYER,
     UI_MENU_VIDEO,
     UI_VIDEO_PLAYER,
-    UI_MENU_ONLINE, // New Online Mode
+    UI_MENU_ONLINE, // 新增在线模式
+    UI_GAME_JOY,    // 新增游戏手柄模式
     UI_SNAKE,
     UI_BREAKOUT,
     UI_FLAPPY,
     UI_RACING,
     UI_RUNTINY,
-    UI_TANK, // New Tank Game
+    UI_TANK, // 新增坦克游戏
     UI_ABOUT
 };
 
@@ -263,11 +267,12 @@ static const char* main_menu_items[] = {
     "Music",
     "Video",
     "Games",
-    "Online", // New Item
+    "Online", 
+    "Game Joy", // 新增项目
     "Settings",
     "About"
 };
-static const int main_menu_count = 6;
+static const int main_menu_count = 7;
 
 static const char* games_menu_items[] = {
     "Snake",
@@ -275,22 +280,22 @@ static const char* games_menu_items[] = {
     "Flappy",
     "Racing",
     "RunTiny",
-    "Tank", // New Game
+    "Tank", // 新增游戏
     "Back"
 };
 static const int games_menu_count = 7;
 
-// --- Snake Game Logic ---
+// --- 贪吃蛇游戏逻辑 ---
 void Init_Snake_Game(void) {
     snake_len = 3;
     snake_body[0].x = 10; snake_body[0].y = 10;
     snake_body[1].x = 10; snake_body[1].y = 9;
     snake_body[2].x = 10; snake_body[2].y = 8;
     
-    snake_dir = 3; // RIGHT
+    snake_dir = 3; // 右
     Game_Input_Dir = 3;
     
-    // Random Food
+    // 随机食物
     snake_food.x = rand() % SNAKE_GRID_SIZE;
     snake_food.y = rand() % SNAKE_GRID_SIZE;
     
@@ -309,58 +314,58 @@ void Update_Snake_Game(void) {
     if(Game_Input_Dir == 2 && snake_dir != 3) snake_dir = 2;
     if(Game_Input_Dir == 3 && snake_dir != 2) snake_dir = 3;
     
-    if(millis() - last_game_tick > 200) { // 200ms speed
+    if(millis() - last_game_tick > 200) { // 200ms 速度
         last_game_tick = millis();
         
-        // Move Body
+        // 移动身体
         for(int i=snake_len-1; i>0; i--) {
             snake_body[i] = snake_body[i-1];
         }
         
-        // Move Head
-        if(snake_dir == 0) snake_body[0].y++; // UP
-        if(snake_dir == 1) snake_body[0].y--; // DOWN
-        if(snake_dir == 2) snake_body[0].x--; // LEFT
-        if(snake_dir == 3) snake_body[0].x++; // RIGHT
+        // 移动头部
+        if(snake_dir == 0) snake_body[0].y++; // 上
+        if(snake_dir == 1) snake_body[0].y--; // 下
+        if(snake_dir == 2) snake_body[0].x--; // 左
+        if(snake_dir == 3) snake_body[0].x++; // 右
         
-        // Check Wall Collision
+        // 检查墙壁碰撞
         if(snake_body[0].x < 0 || snake_body[0].x >= SNAKE_GRID_SIZE ||
            snake_body[0].y < 0 || snake_body[0].y >= SNAKE_GRID_SIZE) {
             game_over = 1;
         }
         
-        // Check Self Collision
+        // 检查自身碰撞
         for(int i=1; i<snake_len; i++) {
             if(snake_body[0].x == snake_body[i].x && snake_body[0].y == snake_body[i].y) {
                 game_over = 1;
             }
         }
         
-        // Check Food
+        // 检查食物
         if(snake_body[0].x == snake_food.x && snake_body[0].y == snake_food.y) {
             if(snake_len < SNAKE_MAX_LEN) {
                 snake_len++;
                 game_score += 10;
             }
-            // New Food
+            // 新食物
             snake_food.x = rand() % SNAKE_GRID_SIZE;
             snake_food.y = rand() % SNAKE_GRID_SIZE;
         }
     }
 }
 
-// --- Breakout Game Logic ---
+// --- 打砖块游戏逻辑 ---
 void Init_Breakout_Game(void) {
-    // Reset Paddle
+    // 重置挡板
     brk_paddle.x = 1024 - (BRK_PADDLE_W / 2);
 
-    // Reset Ball
+    // 重置球
     brk_ball.x = 1024;
     brk_ball.y = 750;
     brk_ball.vx = 15; 
     brk_ball.vy = 15;
 
-    // Reset Bricks
+    // 重置砖块
     brk_brick_count = 0;
     for(int r=0; r<BRK_ROWS; r++) {
         for(int c=0; c<BRK_COLS; c++) {
@@ -377,16 +382,16 @@ void Init_Breakout_Game(void) {
 void Update_Breakout_Game(int16_t encoder_delta) {
     if(brk_game_over) return;
 
-    // Update Paddle
-    brk_paddle.x += encoder_delta * 50; // Sensitivity
+    // 更新挡板
+    brk_paddle.x += encoder_delta * 50; // 灵敏度
     if(brk_paddle.x < 0) brk_paddle.x = 0;
     if(brk_paddle.x > 2048 - BRK_PADDLE_W) brk_paddle.x = 2048 - BRK_PADDLE_W;
 
-    // Update Ball
+    // 更新球
     brk_ball.x += brk_ball.vx;
     brk_ball.y += brk_ball.vy;
 
-    // Wall Collisions (Left/Right)
+    // 墙壁碰撞 (左/右)
     if(brk_ball.x <= 0) {
         brk_ball.x = 0;
         brk_ball.vx = -brk_ball.vx;
@@ -396,40 +401,40 @@ void Update_Breakout_Game(int16_t encoder_delta) {
         brk_ball.vx = -brk_ball.vx;
     }
     
-    // Top Wall
+    // 顶部墙壁
     if(brk_ball.y >= 2048) {
         brk_ball.y = 2048;
         brk_ball.vy = -brk_ball.vy;
     }
 
-    // Paddle Collision (Bottom)
+    // 挡板碰撞 (底部)
     int paddle_y = 100;
     int paddle_top = paddle_y + BRK_PADDLE_H;
     
-    // Only check collision if moving DOWN
+    // 仅在向下移动时检查碰撞
     if(brk_ball.vy < 0) {
         if(brk_ball.y <= paddle_top + BRK_BALL_R && brk_ball.y >= 25) {
-            // Check X range
+            // 检查 X 范围
             if(brk_ball.x >= brk_paddle.x - BRK_BALL_R && brk_ball.x <= brk_paddle.x + BRK_PADDLE_W + BRK_BALL_R) {
-                // Hit
-                brk_ball.vy = abs(brk_ball.vy); // Force Up
+                // 击中
+                brk_ball.vy = abs(brk_ball.vy); // 强制向上
                 
-                // Anti-Tunneling: Push ball to surface
+                // 防穿透：将球推到表面
                 brk_ball.y = paddle_top + BRK_BALL_R + 1;
                 
-                // Add some paddle velocity influence (optional)
+                // 添加一些挡板速度影响 (可选)
                 // brk_ball.vx += encoder_delta * 2;
             }
         }
     }
 
-    // Bottom Wall (Death)
+    // 底部墙壁 (死亡)
     if(brk_ball.y < 0) {
         brk_lives--;
         if(brk_lives <= 0) {
-            brk_game_over = 1; // Lose
+            brk_game_over = 1; // 输
         } else {
-            // Reset Ball
+            // 重置球
             brk_ball.x = 1024;
             brk_ball.y = 750;
             brk_ball.vx = 15;
@@ -437,10 +442,10 @@ void Update_Breakout_Game(int16_t encoder_delta) {
         }
     }
 
-    // Brick Collision
+    // 砖块碰撞
     int brick_start_y = 1500;
     
-    // Optimization: Only check if ball is in brick area
+    // 优化：仅在球位于砖块区域时检查
     if(brk_ball.y >= brick_start_y && brk_ball.y <= brick_start_y + (BRK_ROWS * BRK_BRICK_H)) {
         int r = (brk_ball.y - brick_start_y) / BRK_BRICK_H;
         int c = brk_ball.x / BRK_BRICK_W;
@@ -451,18 +456,18 @@ void Update_Breakout_Game(int16_t encoder_delta) {
                 brk_score += 10;
                 brk_brick_count--;
                 
-                // Simple bounce (reverse Y) - could be improved
+                // 简单反弹 (反转 Y) - 可以改进
                 brk_ball.vy = -brk_ball.vy;
                 
                 if(brk_brick_count <= 0) {
-                    brk_game_over = 2; // Win
+                    brk_game_over = 2; // 赢
                 }
             }
         }
     }
 }
 
-// --- Flappy Game Logic ---
+// --- Flappy 游戏逻辑 ---
 void Init_Flappy_Game(void) {
     flp_player.y = 1024;
     flp_player.vy = 0;
@@ -470,11 +475,11 @@ void Init_Flappy_Game(void) {
     flp_score = 0;
     flp_game_over = 0;
     
-    // Init Obstacles
+    // 初始化障碍物
     for(int i=0; i<FLP_MAX_OBSTACLES; i++) {
         flp_obstacles[i].active = 1;
         flp_obstacles[i].x = 2048 + 250 + (i * FLP_OBSTACLE_SPACING);
-        flp_obstacles[i].gap_y = 500 + (rand() % 1048); // 500 to 1548
+        flp_obstacles[i].gap_y = 500 + (rand() % 1048); // 500 到 1548
         flp_obstacles[i].passed = 0;
     }
 }
@@ -482,7 +487,7 @@ void Init_Flappy_Game(void) {
 void Update_Flappy_Game(int jump_requested) {
     if(flp_game_over) return;
     
-    // Physics
+    // 物理
     if(jump_requested) {
         flp_player.vy = FLP_JUMP_FORCE;
     }
@@ -490,11 +495,11 @@ void Update_Flappy_Game(int jump_requested) {
     flp_player.y += flp_player.vy;
     flp_player.vy -= FLP_GRAVITY;
     
-    // Cap Velocity
+    // 限制速度
     if(flp_player.vy < -25) flp_player.vy = -25;
     if(flp_player.vy > 25) flp_player.vy = 25;
     
-    // Floor/Ceiling Collision
+    // 地板/天花板碰撞
     if(flp_player.y < FLP_PLAYER_R) {
         flp_player.y = FLP_PLAYER_R;
         flp_game_over = 1;
@@ -504,13 +509,13 @@ void Update_Flappy_Game(int jump_requested) {
         flp_player.vy = 0;
     }
     
-    // Obstacles
+    // 障碍物
     for(int i=0; i<FLP_MAX_OBSTACLES; i++) {
         flp_obstacles[i].x -= FLP_SPEED;
         
-        // Recycle
+        // 回收
         if(flp_obstacles[i].x < -FLP_OBSTACLE_W) {
-            // Find max x to place after
+            // 找到最大 x 以放置在其后
             int max_x = 0;
             for(int j=0; j<FLP_MAX_OBSTACLES; j++) {
                 if(flp_obstacles[j].x > max_x) max_x = flp_obstacles[j].x;
@@ -520,21 +525,21 @@ void Update_Flappy_Game(int jump_requested) {
             flp_obstacles[i].passed = 0;
         }
         
-        // Collision
+        // 碰撞
         int ox = flp_obstacles[i].x;
         int ow = FLP_OBSTACLE_W;
         int gap_top = flp_obstacles[i].gap_y + FLP_GAP_H/2;
         int gap_bot = flp_obstacles[i].gap_y - FLP_GAP_H/2;
         
-        // Horizontal Check
+        // 水平检查
         if(FLP_PLAYER_X + FLP_PLAYER_R > ox && FLP_PLAYER_X - FLP_PLAYER_R < ox + ow) {
-            // Vertical Check (Hit Top or Hit Bottom)
+            // 垂直检查 (击中顶部或底部)
             if(flp_player.y + FLP_PLAYER_R > gap_top || flp_player.y - FLP_PLAYER_R < gap_bot) {
                 flp_game_over = 1;
             }
         }
         
-        // Score
+        // 得分
         if(!flp_obstacles[i].passed && flp_obstacles[i].x + ow < FLP_PLAYER_X - FLP_PLAYER_R) {
             flp_score++;
             flp_obstacles[i].passed = 1;
@@ -542,17 +547,17 @@ void Update_Flappy_Game(int jump_requested) {
     }
 }
 
-// --- Racing Game Logic ---
+// --- 赛车游戏逻辑 ---
 void Init_Racing_Game(void) {
     race_car.x = 1024 - (RACE_CAR_W / 2);
     race_score = 0;
     race_game_over = 0;
     
-    // Init Obstacles
+    // 初始化障碍物
     for(int i=0; i<RACE_MAX_OBSTACLES; i++) {
         race_obstacles[i].active = 1;
         race_obstacles[i].x = rand() % (2048 - RACE_OBSTACLE_W);
-        race_obstacles[i].y = 2048 + (i * 750); // Spacing
+        race_obstacles[i].y = 2048 + (i * 750); // 间距
         race_obstacles[i].passed = 0;
     }
 }
@@ -560,32 +565,32 @@ void Init_Racing_Game(void) {
 void Update_Racing_Game(int16_t encoder_delta) {
     if(race_game_over) return;
     
-    // Move Car
-    race_car.x += encoder_delta * 75; // Sensitivity
+    // 移动赛车
+    race_car.x += encoder_delta * 75; // 灵敏度
     if(race_car.x < 0) race_car.x = 0;
     if(race_car.x > 2048 - RACE_CAR_W) race_car.x = 2048 - RACE_CAR_W;
     
-    // Move Obstacles
+    // 移动障碍物
     int current_speed = RACE_SPEED + (race_score * 0.25);
-    if(current_speed > 75) current_speed = 75; // Cap speed
+    if(current_speed > 75) current_speed = 75; // 限制速度
 
     for(int i=0; i<RACE_MAX_OBSTACLES; i++) {
         race_obstacles[i].y -= current_speed;
         
-        // Recycle
+        // 回收
         if(race_obstacles[i].y < -RACE_OBSTACLE_H) {
-            // Find max y
+            // 找到最大 y
             int max_y = 0;
             for(int j=0; j<RACE_MAX_OBSTACLES; j++) {
                 if(race_obstacles[j].y > max_y) max_y = race_obstacles[j].y;
             }
-            race_obstacles[i].y = max_y + 750; // Spacing
+            race_obstacles[i].y = max_y + 750; // 间距
             race_obstacles[i].x = rand() % (2048 - RACE_OBSTACLE_W);
             race_obstacles[i].passed = 0;
         }
         
-        // Collision
-        // Simple AABB
+        // 碰撞
+        // 简单 AABB
         if(race_car.x < race_obstacles[i].x + RACE_OBSTACLE_W &&
            race_car.x + RACE_CAR_W > race_obstacles[i].x &&
            100 < race_obstacles[i].y + RACE_OBSTACLE_H &&
@@ -593,7 +598,7 @@ void Update_Racing_Game(int16_t encoder_delta) {
             race_game_over = 1;
         }
         
-        // Score
+        // 得分
         if(!race_obstacles[i].passed && race_obstacles[i].y + RACE_OBSTACLE_H < 100) {
             race_score++;
             race_obstacles[i].passed = 1;
@@ -601,7 +606,7 @@ void Update_Racing_Game(int16_t encoder_delta) {
     }
 }
 
-// --- RunTiny Game Logic ---
+// --- RunTiny 游戏逻辑 ---
 void Init_RunTiny_Game(void) {
     run_player.y = RUN_GROUND_Y;
     run_player.vy = 0;
@@ -610,10 +615,10 @@ void Init_RunTiny_Game(void) {
     run_score = 0;
     run_game_over = 0;
     
-    // Init Obstacles
+    // 初始化障碍物
     for(int i=0; i<RUN_MAX_OBSTACLES; i++) {
         run_obstacles[i].active = 1;
-        run_obstacles[i].x = 2048 + 500 + (i * 1000) + (rand() % 400); // Spacing with jitter
+        run_obstacles[i].x = 2048 + 500 + (i * 1000) + (rand() % 400); // 带抖动的间距
         run_obstacles[i].passed = 0;
     }
 }
@@ -621,7 +626,7 @@ void Init_RunTiny_Game(void) {
 void Update_RunTiny_Game(int jump_requested) {
     if(run_game_over) return;
     
-    // Physics
+    // 物理
     if(jump_requested && !run_player.jumping) {
         run_player.vy = RUN_JUMP_FORCE;
         run_player.jumping = 1;
@@ -637,33 +642,33 @@ void Update_RunTiny_Game(int jump_requested) {
         run_player.jumping = 0;
     }
     
-    // Move Obstacles
+    // 移动障碍物
     int current_speed = RUN_SPEED + (run_score * 0.1);
     if(current_speed > 50) current_speed = 50;
     
     for(int i=0; i<RUN_MAX_OBSTACLES; i++) {
         run_obstacles[i].x -= current_speed;
         
-        // Recycle
+        // 回收
         if(run_obstacles[i].x < -RUN_OBSTACLE_W) {
-            // Find max x
+            // 找到最大 x
             int max_x = 0;
             for(int j=0; j<RUN_MAX_OBSTACLES; j++) {
                 if(run_obstacles[j].x > max_x) max_x = run_obstacles[j].x;
             }
-            // More random spacing: 600 to 1350
+            // 更随机的间距: 600 到 1350
             run_obstacles[i].x = max_x + 600 + (rand() % 750);
             run_obstacles[i].passed = 0;
         }
         
-        // Collision
+        // 碰撞
         if(run_obstacles[i].x < RUN_PLAYER_X + RUN_PLAYER_W &&
            run_obstacles[i].x + RUN_OBSTACLE_W > RUN_PLAYER_X &&
-           run_player.y < RUN_GROUND_Y + RUN_OBSTACLE_H) { // Simple height check
+           run_player.y < RUN_GROUND_Y + RUN_OBSTACLE_H) { // 简单高度检查
             run_game_over = 1;
         }
         
-        // Score
+        // 得分
         if(!run_obstacles[i].passed && run_obstacles[i].x + RUN_OBSTACLE_W < RUN_PLAYER_X) {
             run_score++;
             run_obstacles[i].passed = 1;
@@ -671,66 +676,66 @@ void Update_RunTiny_Game(int jump_requested) {
     }
 }
 
-// --- Tank Game Logic ---
+// --- 坦克游戏逻辑 ---
 
-// --- Tank Game Map ---
+// --- 坦克游戏地图 ---
 #define TANK_MAP_SIZE 6
 typedef struct {
     int x, y, w, h;
-    int type; // 0: Wall (Bounce), 1: Water (Tank Block, Bullet Pass)
+    int type; // 0: 墙 (反弹), 1: 水 (坦克阻挡, 子弹穿过)
 } TankMapObject;
 
 static TankMapObject tank_map[TANK_MAP_SIZE] = {
-    {500, 500, 100, 400, 0},   // Wall 1
-    {1400, 1200, 100, 400, 0}, // Wall 2
-    {800, 1000, 400, 100, 0},  // Wall 3
-    {200, 1500, 300, 300, 1},  // Water 1
-    {1500, 200, 300, 300, 1},  // Water 2
-    {900, 400, 200, 200, 1}    // Water 3
+    {500, 500, 100, 400, 0},   // 墙 1
+    {1400, 1200, 100, 400, 0}, // 墙 2
+    {800, 1000, 400, 100, 0},  // 墙 3
+    {200, 1500, 300, 300, 1},  // 水 1
+    {1500, 200, 300, 300, 1},  // 水 2
+    {900, 400, 200, 200, 1}    // 水 3
 };
 
 bool Check_Tank_Collision(float x, float y) {
-    // Check Map Objects
+    // 检查地图对象
     for(int i=0; i<TANK_MAP_SIZE; i++) {
-        // Simple AABB vs Point (Tank Center)
+        // 简单 AABB vs 点 (坦克中心)
         if(x >= tank_map[i].x && x <= tank_map[i].x + tank_map[i].w &&
            y >= tank_map[i].y && y <= tank_map[i].y + tank_map[i].h) {
-            return true; // Collision
+            return true; // 碰撞
         }
     }
     return false;
 }
 
-// Returns true if bounced
+// 如果反弹则返回 true
 bool Check_Bullet_Collision(float &x, float &y, float &vx, float &vy, int &bounce_count) {
     bool bounced = false;
     
-    // Screen Boundaries
+    // 屏幕边界
     if(x < 0) { x = 0; vx = -vx; bounced = true; }
     if(x > 2047) { x = 2047; vx = -vx; bounced = true; }
     if(y < 0) { y = 0; vy = -vy; bounced = true; }
     if(y > 2047) { y = 2047; vy = -vy; bounced = true; }
     
-    // Map Walls (Type 0)
+    // 地图墙壁 (类型 0)
     for(int i=0; i<TANK_MAP_SIZE; i++) {
-        if(tank_map[i].type == 0) { // Wall
+        if(tank_map[i].type == 0) { // 墙
             if(x >= tank_map[i].x && x <= tank_map[i].x + tank_map[i].w &&
                y >= tank_map[i].y && y <= tank_map[i].y + tank_map[i].h) {
                 
-                // Determine side of collision to reflect correctly
-                // Previous position was (x-vx, y-vy)
+                // 确定碰撞侧以正确反射
+                // 上一个位置是 (x-vx, y-vy)
                 float prev_x = x - vx;
                 float prev_y = y - vy;
                 
-                // Check if we were outside in X
+                // 检查是否在 X 轴外
                 bool outside_x = (prev_x < tank_map[i].x || prev_x > tank_map[i].x + tank_map[i].w);
-                // Check if we were outside in Y
+                // 检查是否在 Y 轴外
                 bool outside_y = (prev_y < tank_map[i].y || prev_y > tank_map[i].y + tank_map[i].h);
                 
                 if(outside_x) vx = -vx;
                 if(outside_y) vy = -vy;
                 
-                // Push out slightly to prevent sticking
+                // 稍微推出以防止粘连
                 x += vx; 
                 y += vy;
                 
@@ -749,29 +754,29 @@ bool Check_Bullet_Collision(float &x, float &y, float &vx, float &vy, int &bounc
 void Generate_Random_Map(uint32_t seed) {
     srand(seed);
     for(int i=0; i<TANK_MAP_SIZE; i++) {
-        // Randomize type (0 or 1)
+        // 随机化类型 (0 或 1)
         tank_map[i].type = rand() % 2;
         
-        // Randomize Position (Keep away from extreme corners to allow spawn)
-        // Screen 0-2047.
-        // Walls/Water size ~100-400.
+        // 随机化位置 (远离极端角落以允许生成)
+        // 屏幕 0-2047.
+        // 墙/水大小 ~100-400.
         tank_map[i].w = 100 + (rand() % 300);
         tank_map[i].h = 100 + (rand() % 300);
         
-        // Ensure they are somewhat central or scattered
+        // 确保它们稍微居中或分散
         tank_map[i].x = 200 + (rand() % 1600);
         tank_map[i].y = 200 + (rand() % 1600);
     }
 }
 
 void Init_Tank_Game(uint32_t seed, bool is_initiator) {
-    // Check Connection
+    // 检查连接
     if(Network_Manager::getState() != NET_CONNECTED && Network_Manager::getState() != NET_IN_GAME) {
-        tank_game_over = 2; // Not Connected
+        tank_game_over = 2; // 未连接
         return;
     }
 
-    // If we are the initiator (not already in game), send Start Game
+    // 如果我们是发起者 (尚未在游戏中), 发送开始游戏
     if(is_initiator) {
         if(seed == 0) seed = millis();
         Network_Manager::startGame(1, seed); 
@@ -779,24 +784,24 @@ void Init_Tank_Game(uint32_t seed, bool is_initiator) {
     
     Generate_Random_Map(seed);
 
-    // Spawn Points
+    // 生成点
     if(is_initiator) {
         my_tank.x = 200;
         my_tank.y = 200;
-        my_tank.angle = -1.5707f; // Face Up
+        my_tank.angle = -1.5707f; // 朝上
     } else {
         my_tank.x = 1800;
         my_tank.y = 1800;
-        my_tank.angle = 1.5707f; // Face Down
+        my_tank.angle = 1.5707f; // 朝下
     }
     
-    // Check Spawn Validity (Micro-move)
+    // 检查生成有效性 (微移)
     int attempts = 0;
     while(Check_Tank_Collision(my_tank.x, my_tank.y) && attempts < 100) {
         my_tank.x += (rand() % 200) - 100;
         my_tank.y += (rand() % 200) - 100;
         
-        // Keep in bounds
+        // 保持在边界内
         if(my_tank.x < 50) my_tank.x = 50;
         if(my_tank.x > 1997) my_tank.x = 1997;
         if(my_tank.y < 50) my_tank.y = 50;
@@ -815,46 +820,46 @@ void Init_Tank_Game(uint32_t seed, bool is_initiator) {
 void Update_Tank_Game(void) {
     if(tank_game_over) return;
 
-    // Check Remote Exit
+    // 检查远程退出
     uint8_t reason;
     if(Network_Manager::isRemoteGameEnded(&reason)) {
         if(reason == 1) {
-             tank_game_over = 4; // You Win (Opponent Died)
+             tank_game_over = 4; // 你赢了 (对手死亡)
         } else {
-             tank_game_over = 3; // Opponent Left
+             tank_game_over = 3; // 对手离开
         }
         return;
     }
 
-    // Inputs
-    // Left Stick Y (JOY1_Y) - Forward/Back
-    // Right Stick X (JOY2_X) - Rotate
-    // Button A (JOY_A) - Fire
+    // 输入
+    // 左摇杆 Y (JOY1_Y) - 前进/后退
+    // 右摇杆 X (JOY2_X) - 旋转
+    // 按钮 A (JOY_A) - 开火
     
     int joy1_y = analogRead(JOY1_Y); // 0-4095
     int joy2_x = analogRead(JOY2_X); // 0-4095
-    int btn_a = !digitalRead(JOY_A);  // Released = 1 (HIGH), Pressed = 0 (LOW)
+    int btn_a = !digitalRead(JOY_A);  // 松开 = 1 (HIGH), 按下 = 0 (LOW)
     
-    // Deadzone & Mapping
+    // 死区和映射
     float speed = 0;
     if(abs(joy1_y - 2048) > 300) {
-        // Assuming Up (Low val) -> Forward
-        // 2048 - val: Positive if val < 2048 (Up)
+        // 假设向上 (低值) -> 前进
+        // 2048 - val: 如果 val < 2048 (向上) 则为正
         speed = (2048 - joy1_y) / 2048.0f * TANK_SPEED;
     }
     
     float turn = 0;
     if(abs(joy2_x - 2048) > 300) {
-        // Assuming Right (High val) -> Clockwise
+        // 假设向右 (高值) -> 顺时针
         turn = (joy2_x - 2048) / 2048.0f * TANK_TURN_SPEED;
     }
     
-    // Update Tank
+    // 更新坦克
     my_tank.angle += turn;
     float next_x = my_tank.x + speed * cos(my_tank.angle);
     float next_y = my_tank.y + speed * sin(my_tank.angle);
     
-    // Check Collision (Map & Boundary)
+    // 检查碰撞 (地图和边界)
     if(next_x >= 50 && next_x <= 1997 && next_y >= 50 && next_y <= 1997 && !Check_Tank_Collision(next_x, next_y)) {
         my_tank.x = next_x;
         my_tank.y = next_y;
@@ -862,13 +867,13 @@ void Update_Tank_Game(void) {
     
     static int bullet_frames[TANK_MAX_BULLETS];
 
-    // Fire (Pressed = LOW)
+    // 开火 (按下 = LOW)
     if(btn_a == LOW && millis() - last_fire_time > 250) { 
         last_fire_time = millis();
         for(int i=0; i<TANK_MAX_BULLETS; i++) {
             if(!tank_bullets[i].active) {
                 tank_bullets[i].active = true;
-                // Spawn at tip of barrel (approx 100 units)
+                // 在炮管尖端生成 (约 100 单位)
                 tank_bullets[i].x = my_tank.x + 100 * cos(my_tank.angle); 
                 tank_bullets[i].y = my_tank.y + 100 * sin(my_tank.angle);
                 tank_bullets[i].vx = TANK_BULLET_SPEED * cos(my_tank.angle);
@@ -880,13 +885,13 @@ void Update_Tank_Game(void) {
         }
     }
     
-    // Update Bullets
+    // 更新子弹
     for(int i=0; i<TANK_MAX_BULLETS; i++) {
         if(tank_bullets[i].active) {
             tank_bullets[i].x += tank_bullets[i].vx;
             tank_bullets[i].y += tank_bullets[i].vy;
             
-            // Check Collision (Bounce)
+            // 检查碰撞 (反弹)
             Check_Bullet_Collision(tank_bullets[i].x, tank_bullets[i].y, tank_bullets[i].vx, tank_bullets[i].vy, tank_bullets[i].bounce_count);
             
             if(tank_bullets[i].bounce_count > 5) {
@@ -894,37 +899,37 @@ void Update_Tank_Game(void) {
             }
 
             bullet_frames[i]++;
-            if(bullet_frames[i] > 300) { // 12 seconds life
+            if(bullet_frames[i] > 300) { // 12 秒寿命
                 tank_bullets[i].active = false;
             }
             
-            // Check Self Hit (Suicide)
+            // 检查自身击中 (自杀)
             float dx = tank_bullets[i].x - my_tank.x;
             float dy = tank_bullets[i].y - my_tank.y;
-            if(dx*dx + dy*dy < 60*60) { // Tank Radius approx 60 (Increased from 30)
-                tank_game_over = 1; // I died
+            if(dx*dx + dy*dy < 60*60) { // 坦克半径约 60 (从 30 增加)
+                tank_game_over = 1; // 我死了
             }
         }
     }
     
-    // Check Remote Bullets Hit Me
+    // 检查远程子弹击中我
     TankData remoteData;
     if(Network_Manager::getRemoteGameData(&remoteData)) {
         for(int i=0; i<remoteData.bullet_count; i++) {
              float dx = remoteData.bullets[i].x - my_tank.x;
              float dy = remoteData.bullets[i].y - my_tank.y;
-             if(dx*dx + dy*dy < 60*60) { // Tank Radius approx 60 (Increased from 30)
-                 tank_game_over = 1; // I died
+             if(dx*dx + dy*dy < 60*60) { // 坦克半径约 60 (从 30 增加)
+                 tank_game_over = 1; // 我死了
              }
         }
     }
     
     if(tank_game_over == 1) {
-        Network_Manager::endGame(1); // Notify peer I lost (Reason 1 = Died)
+        Network_Manager::endGame(1); // 通知对等方我输了 (原因 1 = 死亡)
     }
 
-    // Network Sync (100Hz approx, called every frame which is 25Hz in main loop, but we want faster?)
-    // Main loop delay is 40ms (25Hz). We should send every frame.
+    // 网络同步 (约 100Hz, 每帧调用一次, 主循环为 25Hz, 但我们想要更快?)
+    // 主循环延迟为 40ms (25Hz). 我们应该每帧发送.
     TankData data;
     data.x = my_tank.x;
     data.y = my_tank.y;
@@ -942,7 +947,7 @@ void Update_Tank_Game(void) {
     Network_Manager::sendGameData(data);
 }
 
-// --- Music Logic ---
+// --- 音乐逻辑 ---
 void Scan_Music_Files() {
     music_files.clear();
     File root = SD_MMC.open("/music");
@@ -971,7 +976,7 @@ bool Play_Music(const char* filename) {
         return false;
     }
     
-    // Read WAV Header
+    // 读取 WAV 头
     uint8_t header[44];
     if(audioFile.read(header, 44) != 44) {
         Serial.println("Failed to read WAV header");
@@ -979,23 +984,23 @@ bool Play_Music(const char* filename) {
         return false;
     }
     
-    // Check RIFF
+    // 检查 RIFF
     if(header[0] != 'R' || header[1] != 'I' || header[2] != 'F' || header[3] != 'F') {
         Serial.println("Not a RIFF file");
         audioFile.close();
         return false;
     }
     
-    // Get Sample Rate (Offset 24, 4 bytes)
+    // 获取采样率 (偏移 24, 4 字节)
     uint32_t sampleRate = header[24] | (header[25] << 8) | (header[26] << 16) | (header[27] << 24);
     Serial.printf("Sample Rate: %d\n", sampleRate);
     
-    // Get Channels (Offset 22, 2 bytes)
+    // 获取通道数 (偏移 22, 2 字节)
     uint16_t channels = header[22] | (header[23] << 8);
     Serial.printf("Channels: %d\n", channels);
     music_channels = channels;
     
-    // Get Bits Per Sample (Offset 34, 2 bytes)
+    // 获取每样本位数 (偏移 34, 2 字节)
     uint16_t bitsPerSample = header[34] | (header[35] << 8);
     Serial.printf("Bits: %d\n", bitsPerSample);
     
@@ -1008,7 +1013,7 @@ bool Play_Music(const char* filename) {
     Serial.printf("File Size: %d\n", audioFile.size());
     
     is_playing = true;
-    Set_Player_Mode(1); // 1=Audio
+    Set_Player_Mode(1); // 1=音频
     setDACFreq(sampleRate);
     return true;
 }
@@ -1016,10 +1021,10 @@ bool Play_Music(const char* filename) {
 void Stop_Music() {
     is_playing = false;
     if(audioFile) audioFile.close();
-    Set_Player_Mode(0); // 0=Vector
+    Set_Player_Mode(0); // 0=矢量
 }
 
-// --- Video Logic ---
+// --- 视频逻辑 ---
 void Scan_Video_Files() {
     video_files.clear();
     File root = SD_MMC.open("/video");
@@ -1048,7 +1053,7 @@ bool Play_Video(const char* filename) {
         return false;
     }
     
-    // Read WAV Header
+    // 读取 WAV 头
     uint8_t header[44];
     if(videoFile.read(header, 44) != 44) {
         Serial.println("Failed to read WAV header");
@@ -1056,23 +1061,23 @@ bool Play_Video(const char* filename) {
         return false;
     }
     
-    // Check RIFF
+    // 检查 RIFF
     if(header[0] != 'R' || header[1] != 'I' || header[2] != 'F' || header[3] != 'F') {
         Serial.println("Not a RIFF file");
         videoFile.close();
         return false;
     }
     
-    // Get Sample Rate (Offset 24, 4 bytes)
+    // 获取采样率 (偏移 24, 4 字节)
     uint32_t sampleRate = header[24] | (header[25] << 8) | (header[26] << 16) | (header[27] << 24);
     Serial.printf("Sample Rate: %d\n", sampleRate);
     
-    // Get Channels (Offset 22, 2 bytes)
+    // 获取通道数 (偏移 22, 2 字节)
     uint16_t channels = header[22] | (header[23] << 8);
     Serial.printf("Channels: %d\n", channels);
     video_channels = channels;
     
-    // Get Bits Per Sample (Offset 34, 2 bytes)
+    // 获取每样本位数 (偏移 34, 2 字节)
     uint16_t bitsPerSample = header[34] | (header[35] << 8);
     Serial.printf("Bits: %d\n", bitsPerSample);
     
@@ -1091,7 +1096,7 @@ bool Play_Video(const char* filename) {
     Serial.printf("File Size: %d\n", videoFile.size());
     
     is_video_playing = true;
-    Set_Player_Mode(2); // 2=Video
+    Set_Player_Mode(2); // 2=视频
     setDACFreq(sampleRate);
     return true;
 }
@@ -1099,20 +1104,20 @@ bool Play_Video(const char* filename) {
 void Stop_Video() {
     is_video_playing = false;
     if(videoFile) videoFile.close();
-    Set_Player_Mode(0); // 0=Vector
+    Set_Player_Mode(0); // 0=矢量
 }
 
 static void guiTask(void* pvParameters) {
-    // Wait for system to stabilize
+    // 等待系统稳定
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Calibration
+    // 校准
     int touch_base_up = 0;
     int touch_base_down = 0;
     int touch_base_left = 0;
     int touch_base_right = 0;
     
-    // Take samples
+    // 采样
     for(int i=0; i<20; i++) {
         touch_base_up += touchRead(TOUCH_UP);
         touch_base_down += touchRead(TOUCH_DOWN);
@@ -1128,13 +1133,13 @@ static void guiTask(void* pvParameters) {
     Serial.printf("Calibrated Touch Base: U=%d D=%d L=%d R=%d\n", 
         touch_base_up, touch_base_down, touch_base_left, touch_base_right);
     
-    // Define a delta
-    // Idle ~30000, Pressed > 70000.
-    // If calibration fails (0), 35000 is safe (30000 < 35000).
-    // If calibration works (30000), Threshold 65000. Pressed (70000+) > 65000.
+    // 定义增量
+    // 空闲 ~30000, 按下 > 70000.
+    // 如果校准失败 (0), 35000 是安全的 (30000 < 35000).
+    // 如果校准成功 (30000), 阈值 65000. 按下 (70000+) > 65000.
     const int TOUCH_DELTA = 35000; 
 
-    // Initialize Network
+    // 初始化网络
     Network_Manager::init();
 
     UI_State ui_state = UI_MENU_MAIN;
@@ -1142,31 +1147,31 @@ static void guiTask(void* pvParameters) {
     int last_menu_index = -1;
     int32_t last_encoder = 0;
     
-    // Debounce for button
+    // 按钮去抖动
     int last_btn_state = HIGH;
     unsigned long last_btn_time = 0;
     
-    // Oscilloscope state
+    // 示波器状态
     int32_t osc_last_val = -999999;
 
-    // Music state
+    // 音乐状态
     int music_scroll = 0;
     const int visible_lines = 5;
     
-    // Main Menu state
+    // 主菜单状态
     int main_menu_scroll = 0;
     const int main_menu_visible_lines = 5;
 
-    // Flappy state
+    // Flappy 状态
     bool last_touch_up = false;
 
     for (;;) {
-        // 1. Handle Input
+        // 1. 处理输入
         int32_t current_encoder = encoderValue / 4;
         int16_t enc_delta = current_encoder - last_encoder;
         last_encoder = current_encoder;
         
-        // Web Input Injection
+        // Web 输入注入
         if (web_enc_delta != 0) {
             enc_delta += web_enc_delta;
             web_enc_delta = 0;
@@ -1175,7 +1180,7 @@ static void guiTask(void* pvParameters) {
         int btn_state = digitalRead(EN_S);
         bool btn_pressed = false;
         
-        // Trigger on Release (Rising Edge) to prevent holding issues
+        // 在释放时触发 (上升沿) 以防止保持问题
         if (btn_state == HIGH && last_btn_state == LOW && (millis() - last_btn_time > 50)) {
             btn_pressed = true;
         }
@@ -1185,13 +1190,13 @@ static void guiTask(void* pvParameters) {
             web_btn_pressed = false;
         }
 
-        // Record time when button goes LOW
+        // 记录按钮变低的时间
         if (btn_state == LOW && last_btn_state == HIGH) {
             last_btn_time = millis();
         }
         last_btn_state = btn_state;
 
-        // Touch Input for Snake
+        // 贪吃蛇触摸输入
         if (ui_state == UI_SNAKE) {
             if (touchRead(TOUCH_UP) > touch_base_up + TOUCH_DELTA) Game_Input_Dir = 0;
             if (touchRead(TOUCH_DOWN) > touch_base_down + TOUCH_DELTA) Game_Input_Dir = 1;
@@ -1253,7 +1258,11 @@ static void guiTask(void* pvParameters) {
                     menu_index = 0;
                     last_menu_index = -1;
                     continue;
-                } else if (menu_index == 5) {
+                } else if (menu_index == 4) {
+                    ui_state = UI_GAME_JOY;
+                    last_menu_index = -1;
+                    continue;
+                } else if (menu_index == 6) {
                     ui_state = UI_ABOUT;
                     last_menu_index = -1; // Ensure redraw
                     continue;
@@ -1292,6 +1301,125 @@ static void guiTask(void* pvParameters) {
                 }
                 updateWebUIStatus(status);
                 last_menu_index = menu_index;
+            }
+
+        } else if (ui_state == UI_GAME_JOY) {
+            // Exit
+            if (btn_pressed) {
+                ui_state = UI_MENU_MAIN;
+                rebuild = true;
+                last_menu_index = -1;
+                if(bleMouse) {
+                    bleMouse->end();
+                    delete bleMouse;
+                    bleMouse = nullptr;
+                }
+                Network_Manager::enable(); // Re-enable WiFi
+                continue;
+            }
+
+            // Check Connection
+            if (!is_joystick_connected) {
+                 if (rebuild || last_menu_index == -1) {
+                    DRAW_Clear();
+                    DRAW_AddString("GAME JOY", 0, 600, 1800, 30, 30);
+                    DRAW_AddString("JOYSTICK", 0, 400, 1100, 30, 30);
+                    DRAW_AddString("DISCONNECTED", 0, 200, 900, 30, 30);
+                    DRAW_AddString("PRESS BTN TO EXIT", 0, 300, 500, 20, 20);
+                    updateWebUIStatus("GAME JOY\nJOYSTICK DISCONNECTED");
+                    last_menu_index = 0;
+                 }
+                 // Don't run mouse logic
+            } else {
+                if (last_menu_index == -1) {
+                    Network_Manager::disable(); // Disable WiFi
+                    vTaskDelay(pdMS_TO_TICKS(200)); 
+                    
+                    // Start BLE
+                    if(bleMouse == nullptr) {
+                        bleMouse = new BleMouse("ESP32 Game Joy", "Espressif", 100);
+                        bleMouse->begin();
+                        // Boost Power to Max (P9 = +9dBm)
+                        BLEDevice::setPower(ESP_PWR_LVL_P9); 
+                    }
+                }
+                
+                if(!bleMouse) continue;
+
+                // Read Joystick
+                int jx = analogRead(JOY2_X);
+                int jy = analogRead(JOY2_Y);
+                
+                // Map to Mouse
+                // Assuming 0-4095. Center ~2048.
+                // Deadzone +/- 200
+                int dx = 0;
+                int dy = 0;
+                
+                // Invert X axis calculation
+                if (abs(jx - 2048) > 200) {
+                    dx = (2048 - jx) / 40; // Inverted X
+                }
+                if (abs(jy - 2048) > 200) {
+                    dy = (jy - 2048) / 40; 
+                }
+                
+                // Button Logic
+                // A = Left Click
+                static bool last_click_left = false;
+                bool click_left = (digitalRead(JOY_A) == LOW);
+                if(click_left != last_click_left) {
+                    if(click_left) bleMouse->press(MOUSE_LEFT);
+                    else bleMouse->release(MOUSE_LEFT);
+                    last_click_left = click_left;
+                }
+
+                // B = Right Click
+                static bool last_click_right = false;
+                bool click_right = (digitalRead(JOY_B) == LOW);
+                if(click_right != last_click_right) {
+                    if(click_right) bleMouse->press(MOUSE_RIGHT);
+                    else bleMouse->release(MOUSE_RIGHT);
+                    last_click_right = click_right;
+                }
+
+                if (bleMouse->isConnected()) {
+                    if(dx != 0 || dy != 0) {
+                        bleMouse->move(dx, dy); // Fixed Direction (Removed minus)
+                    }
+                }
+                
+                // Check Connection State Change for Redraw
+                static bool last_ble_connected = false;
+                bool current_ble_connected = bleMouse->isConnected();
+                if(current_ble_connected != last_ble_connected) {
+                    rebuild = true;
+                    last_ble_connected = current_ble_connected;
+                }
+                
+                // Render
+                if (rebuild || last_menu_index == -1) {
+                    DRAW_Clear();
+                    DRAW_AddString("GAME JOY", 0, 600, 1800, 30, 30);
+                    if(current_ble_connected) {
+                        DRAW_AddString("BLE CONNECTED", 0, 400, 1500, 20, 20);
+                    } else {
+                        DRAW_AddString("WAITING BLE...", 0, 400, 1500, 20, 20);
+                    }
+                    
+                    // Visual Joystick
+                    DRAW_AddCircle(1024, 1024, 500); // Base
+                    int vis_x = 1024 - (dx * 20);
+                    int vis_y = 1024 - (dy * 20); 
+                    
+                    DRAW_AddCircle(vis_x, vis_y, 50); // Stick
+                    
+                    if(click_left) DRAW_AddCircle(vis_x, vis_y, 30); // Left Click feedback
+                    if(click_right) DRAW_AddCircle(vis_x, vis_y, 40); // Right Click feedback
+                    
+                    updateWebUIStatus("GAME JOY\n" + String(current_ble_connected ? "Connected" : "Waiting..."));
+                    last_menu_index = 0;
+                }
             }
             
         } else if (ui_state == UI_MENU_GAMES) {

@@ -61,6 +61,8 @@ enum NetState {
 class Network_Manager {
 public:
     static void init();
+    static void disable();
+    static void enable();
     static void update();
     static void startDiscovery();
     static void stopDiscovery();

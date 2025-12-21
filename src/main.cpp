@@ -7,26 +7,26 @@
 #include "SD_MMC.h"
 #include "dac8554.h"
 
-// Use Hardware SPI (CS=10). SPI pins are default (MOSI=11, SCLK=12)
+// 使用硬件 SPI (CS=10)。SPI 引脚为默认值 (MOSI=11, SCLK=12)
 DAC8554 dac(DAC_CS); 
 
-// --- Encoder Logic ---
+// --- 编码器逻辑 ---
 volatile int32_t encoderValue = 0;
 
-// Web Control Variables
+// Web 控制变量
 volatile int web_enc_delta = 0;
 volatile bool web_btn_pressed = false;
 volatile int web_game_dir = -1;
 
 void IRAM_ATTR readEncoderISR() {
-  static uint8_t old_AB = 3; // Assume start at 11 (pullup)
+  static uint8_t old_AB = 3; // 假设起始状态为 11 (上拉)
   uint8_t enc_A = digitalRead(EN_A);
   uint8_t enc_B = digitalRead(EN_B);
   uint8_t new_AB = (enc_A << 1) | enc_B;
   
   if (old_AB != new_AB) {
-      // Quadrature lookup table
-      // Index: (old_AB << 2) | new_AB
+      // 正交查找表
+      // 索引: (old_AB << 2) | new_AB
       static const int8_t table[16] = {
           0, -1, 1, 0,  // 00 -> ...
           1, 0, 0, -1,  // 01 -> ...
@@ -85,7 +85,7 @@ void setup() {
   pinMode(JOY_A, INPUT_PULLDOWN);
   pinMode(JOY_B, INPUT_PULLDOWN);
 
-  // Encoder Pins
+  // 编码器引脚
   pinMode(EN_A, INPUT_PULLUP);
   pinMode(EN_B, INPUT_PULLUP);
   pinMode(EN_S, INPUT_PULLUP);
@@ -96,9 +96,9 @@ void setup() {
   analogReadResolution(12);
 
   // 初始化 SD 卡
-  // setPins(clk, cmd, d0)
+  // 设置引脚(clk, cmd, d0)
   SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0);
-  // begin(mountpoint, mode1bit, format_if_mount_failed, freq)
+  // begin(挂载点, 1位模式, 挂载失败时格式化, 频率)
   // 降低频率到 20MHz 或更低以减少干扰
   if (!SD_MMC.begin("/sdcard", true, false, 20000)) {
     Serial.println("Card Mount Failed");
@@ -159,7 +159,7 @@ void setup() {
   // 提交帧
   DRAW_Render();
 
-  // Initialize Terminal
+  // 初始化终端
 DRAW_Terminal_Init(10, 100); // Scale 10%, Spacing 100 units
 DRAW_Terminal_Print("SYSTEM BOOT...");
 DRAW_Terminal_Print("CHECKING RAM...");
@@ -172,7 +172,7 @@ DRAW_Terminal_Print("CHECKING RAM...");
 }
 
 void loop() {
-  // Main loop is empty, UI handled by FreeRTOS task
+  // 主循环为空，UI 由 FreeRTOS 任务处理
   delay(100); 
   static bool ledState = false;
     ledState = !ledState;

@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <WebServer.h>
+#include <LittleFS.h>
 #include "freertos.h"
 
 WebServer server(80);
@@ -10,13 +11,32 @@ const char* html = R"rawliteral(
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: Arial; text-align: center; margin:0px auto; padding-top: 30px; background-color: #222; color: #fff; }
+    body { 
+        font-family: Arial; 
+        text-align: center; 
+        margin:0px auto; 
+        padding-top: 30px; 
+        background-color: #222; 
+        color: #fff; 
+        position: relative;
+        min-height: 100vh;
+    }
+    body::before {
+        content: "";
+        position: fixed;
+        top: 0; left: 0; width: 100%; height: 100%;
+        background-image: url('/background.jpg');
+        background-size: cover;
+        background-position: center;
+        opacity: 0.5;
+        z-index: -1;
+    }
     .button { display: inline-block; padding: 20px 30px; font-size: 24px; cursor: pointer; text-align: center; text-decoration: none; outline: none; color: #fff; background-color: #4CAF50; border: none; border-radius: 15px; box-shadow: 0 9px #999; margin: 10px; -webkit-user-select: none; user-select: none; }
     .button:active { background-color: #3e8e41; box-shadow: 0 5px #666; transform: translateY(4px); }
     .nav-btn { background-color: #008CBA; }
     .enter-btn { background-color: #f44336; }
     .row { display: flex; justify-content: center; align-items: center; }
-    #ui-status { margin-top: 20px; padding: 10px; border: 1px solid #555; background: #333; text-align: left; font-family: monospace; white-space: pre-wrap; min-height: 100px; }
+    #ui-status { margin-top: 20px; padding: 10px; border: 1px solid #555; background: rgba(51, 51, 51, 0.8); text-align: left; font-family: monospace; white-space: pre-wrap; min-height: 100px; }
   </style>
   <script>
     var t = 0;
@@ -38,7 +58,7 @@ const char* html = R"rawliteral(
   </script>
 </head>
 <body>
-  <h1>ESP32 Game Control</h1>
+  <h1>ESP32游戏控制台</h1>
   
   <div class="row">
     <button class="button nav-btn" onmousedown="c('/up', event)" ontouchstart="c('/up', event)">UP / PREV</button>
@@ -51,10 +71,12 @@ const char* html = R"rawliteral(
   <div class="row">
     <button class="button nav-btn" onmousedown="c('/down', event)" ontouchstart="c('/down', event)">DOWN / NEXT</button>
   </div>
-
+  <p>当前UI状态: </p>
   <div id="ui-status">Loading UI Status...</div>
 
-  <p>Connect to WiFi: ESP32_Game_Controller / 12345678</p>
+  <p>连接至WiFi: ESP32_Game_XX:XX/密码: 12345678</p>
+  <p>南京理工大学 eeCommunity</p>
+  <p><i>由 llgl0207 制作</i></p>
 </body>
 </html>
 )rawliteral";
@@ -111,6 +133,21 @@ void webServerTask(void* pvParameters) {
   Serial.print("AP IP address: ");
   Serial.println(myIP);
 
+  // Initialize LittleFS
+  if(!LittleFS.begin(true)){
+      Serial.println("An Error has occurred while mounting LittleFS");
+  } else {
+      Serial.println("LittleFS mounted successfully");
+      // List files for debugging
+      File root = LittleFS.open("/");
+      File file = root.openNextFile();
+      while(file){
+          Serial.print("FILE: ");
+          Serial.println(file.name());
+          file = root.openNextFile();
+      }
+  }
+
   server.on("/", handleRoot);
   server.on("/status", handleStatus);
   server.on("/up", handleUp);
@@ -118,6 +155,9 @@ void webServerTask(void* pvParameters) {
   server.on("/left", handleLeft);
   server.on("/right", handleRight);
   server.on("/enter", handleEnter);
+  
+  // Serve background image
+  server.serveStatic("/background.jpg", LittleFS, "/background.jpg");
 
   server.begin();
   Serial.println("HTTP server started");
