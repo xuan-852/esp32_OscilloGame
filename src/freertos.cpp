@@ -1137,7 +1137,8 @@ static void guiTask(void* pvParameters) {
     // 空闲 ~30000, 按下 > 70000.
     // 如果校准失败 (0), 35000 是安全的 (30000 < 35000).
     // 如果校准成功 (30000), 阈值 65000. 按下 (70000+) > 65000.
-    const int TOUCH_DELTA = 35000; 
+    // 用户反馈触摸变化量只有10000以上，所以降低阈值
+    const int TOUCH_DELTA = 5000; 
 
     // 初始化网络
     Network_Manager::init();
@@ -1209,23 +1210,23 @@ static void guiTask(void* pvParameters) {
             }
         }
 
-        // 2. State Machine
+        // 2. 状态机
         bool rebuild = false;
 
-        // Global Game Request Check (for non-blocking states)
+        // 全局游戏请求检查 (用于非阻塞状态)
         uint8_t reqGameId;
         uint32_t reqSeed;
         if(Network_Manager::hasGameRequest(&reqGameId, &reqSeed)) {
             Network_Manager::clearGameRequest();
-            if(reqGameId == 1) { // Tank
+            if(reqGameId == 1) { // 坦克大战
                 ui_state = UI_TANK;
-                Init_Tank_Game(reqSeed, false); // Responder
+                Init_Tank_Game(reqSeed, false); // 响应者
                 rebuild = true;
             }
         }
 
         if (ui_state == UI_MENU_MAIN) {
-            // Navigation
+            // 导航
             if (enc_delta != 0) {
                 menu_index += enc_delta;
                 if (menu_index < 0) menu_index = main_menu_count - 1;
@@ -1233,7 +1234,7 @@ static void guiTask(void* pvParameters) {
                 rebuild = true;
             }
             
-            // Selection
+            // 选择
             if (btn_pressed) {
                 if (menu_index == 0) {
                     ui_state = UI_MENU_MUSIC;
@@ -1249,7 +1250,7 @@ static void guiTask(void* pvParameters) {
                     continue;
                 } else if (menu_index == 2) {
                     ui_state = UI_MENU_GAMES;
-                    menu_index = 0; // Reset for submenu
+                    menu_index = 0; // 重置子菜单
                     last_menu_index = -1;
                     continue;
                 } else if (menu_index == 3) {
@@ -1264,22 +1265,22 @@ static void guiTask(void* pvParameters) {
                     continue;
                 } else if (menu_index == 6) {
                     ui_state = UI_ABOUT;
-                    last_menu_index = -1; // Ensure redraw
+                    last_menu_index = -1; // 确保重绘
                     continue;
                 }
                 rebuild = true;
             }
             
-            // Render Main Menu
+            // 渲染主菜单
             if (rebuild || last_menu_index == -1) {
                 DRAW_Clear();
-                DRAW_AddRect(0, 0, 2047, 2047); // Full Screen Border
+                DRAW_AddRect(0, 0, 2047, 2047); // 全屏边框
                 
                 int start_y = 1600; 
                 int spacing = 400;
                 int scale = 40; 
                 
-                // Calculate Scroll
+                // 计算滚动
                 if(menu_index < main_menu_scroll) main_menu_scroll = menu_index;
                 if(menu_index >= main_menu_scroll + main_menu_visible_lines) main_menu_scroll = menu_index - main_menu_visible_lines + 1;
                 
@@ -1304,7 +1305,7 @@ static void guiTask(void* pvParameters) {
             }
 
         } else if (ui_state == UI_GAME_JOY) {
-            // Exit
+            // 退出
             if (btn_pressed) {
                 ui_state = UI_MENU_MAIN;
                 rebuild = true;
@@ -1314,11 +1315,11 @@ static void guiTask(void* pvParameters) {
                     delete bleMouse;
                     bleMouse = nullptr;
                 }
-                Network_Manager::enable(); // Re-enable WiFi
+                Network_Manager::enable(); // 重新启用 WiFi
                 continue;
             }
 
-            // Check Connection
+            // 检查连接
             if (!is_joystick_connected) {
                  if (rebuild || last_menu_index == -1) {
                     DRAW_Clear();
@@ -1329,43 +1330,43 @@ static void guiTask(void* pvParameters) {
                     updateWebUIStatus("GAME JOY\nJOYSTICK DISCONNECTED");
                     last_menu_index = 0;
                  }
-                 // Don't run mouse logic
+                 // 不运行鼠标逻辑
             } else {
                 if (last_menu_index == -1) {
-                    Network_Manager::disable(); // Disable WiFi
+                    Network_Manager::disable(); // 禁用 WiFi
                     vTaskDelay(pdMS_TO_TICKS(200)); 
                     
-                    // Start BLE
+                    // 启动 BLE
                     if(bleMouse == nullptr) {
                         bleMouse = new BleMouse("ESP32 Game Joy", "Espressif", 100);
                         bleMouse->begin();
-                        // Boost Power to Max (P9 = +9dBm)
+                        // 将功率提升至最大 (P9 = +9dBm)
                         BLEDevice::setPower(ESP_PWR_LVL_P9); 
                     }
                 }
                 
                 if(!bleMouse) continue;
 
-                // Read Joystick
+                // 读取摇杆
                 int jx = analogRead(JOY2_X);
                 int jy = analogRead(JOY2_Y);
                 
-                // Map to Mouse
-                // Assuming 0-4095. Center ~2048.
-                // Deadzone +/- 200
+                // 映射到鼠标
+                // 假设 0-4095. 中心 ~2048.
+                // 死区 +/- 200
                 int dx = 0;
                 int dy = 0;
                 
-                // Invert X axis calculation
+                // 反转 X 轴计算
                 if (abs(jx - 2048) > 200) {
-                    dx = (2048 - jx) / 40; // Inverted X
+                    dx = (2048 - jx) / 40; // 反转 X
                 }
                 if (abs(jy - 2048) > 200) {
                     dy = (jy - 2048) / 40; 
                 }
                 
-                // Button Logic
-                // A = Left Click
+                // 按钮逻辑
+                // A = 左键单击
                 static bool last_click_left = false;
                 bool click_left = (digitalRead(JOY_A) == LOW);
                 if(click_left != last_click_left) {
@@ -1374,7 +1375,7 @@ static void guiTask(void* pvParameters) {
                     last_click_left = click_left;
                 }
 
-                // B = Right Click
+                // B = 右键单击
                 static bool last_click_right = false;
                 bool click_right = (digitalRead(JOY_B) == LOW);
                 if(click_right != last_click_right) {
@@ -1385,11 +1386,11 @@ static void guiTask(void* pvParameters) {
 
                 if (bleMouse->isConnected()) {
                     if(dx != 0 || dy != 0) {
-                        bleMouse->move(dx, dy); // Fixed Direction (Removed minus)
+                        bleMouse->move(dx, dy); // 固定方向 (移除负号)
                     }
                 }
                 
-                // Check Connection State Change for Redraw
+                // 检查连接状态更改以重绘
                 static bool last_ble_connected = false;
                 bool current_ble_connected = bleMouse->isConnected();
                 if(current_ble_connected != last_ble_connected) {
@@ -1397,7 +1398,7 @@ static void guiTask(void* pvParameters) {
                     last_ble_connected = current_ble_connected;
                 }
                 
-                // Render
+                // 渲染
                 if (rebuild || last_menu_index == -1) {
                     DRAW_Clear();
                     DRAW_AddString("GAME JOY", 0, 600, 1800, 30, 30);
@@ -1407,15 +1408,15 @@ static void guiTask(void* pvParameters) {
                         DRAW_AddString("WAITING BLE...", 0, 400, 1500, 20, 20);
                     }
                     
-                    // Visual Joystick
-                    DRAW_AddCircle(1024, 1024, 500); // Base
+                    // 可视化摇杆
+                    DRAW_AddCircle(1024, 1024, 500); // 基座
                     int vis_x = 1024 - (dx * 20);
                     int vis_y = 1024 - (dy * 20); 
                     
-                    DRAW_AddCircle(vis_x, vis_y, 50); // Stick
+                    DRAW_AddCircle(vis_x, vis_y, 50); // 摇杆头
                     
-                    if(click_left) DRAW_AddCircle(vis_x, vis_y, 30); // Left Click feedback
-                    if(click_right) DRAW_AddCircle(vis_x, vis_y, 40); // Right Click feedback
+                    if(click_left) DRAW_AddCircle(vis_x, vis_y, 30); // 左键反馈
+                    if(click_right) DRAW_AddCircle(vis_x, vis_y, 40); // 右键反馈
                     
                     updateWebUIStatus("GAME JOY\n" + String(current_ble_connected ? "Connected" : "Waiting..."));
                     last_menu_index = 0;
@@ -1423,7 +1424,7 @@ static void guiTask(void* pvParameters) {
             }
             
         } else if (ui_state == UI_MENU_GAMES) {
-            // Navigation
+            // 导航
             if (enc_delta != 0) {
                 menu_index += enc_delta;
                 if (menu_index < 0) menu_index = games_menu_count - 1;
@@ -1431,7 +1432,7 @@ static void guiTask(void* pvParameters) {
                 rebuild = true;
             }
             
-            // Selection
+            // 选择
             if (btn_pressed) {
                 if (menu_index == 0) {
                     ui_state = UI_SNAKE;
@@ -1455,18 +1456,18 @@ static void guiTask(void* pvParameters) {
                     continue;
                 } else if (menu_index == 5) {
                     ui_state = UI_TANK;
-                    Init_Tank_Game(0, true); // Initiator, Seed=0 (Auto)
+                    Init_Tank_Game(0, true); // 发起者, Seed=0 (自动)
                     continue;
                 } else if (menu_index == 6) {
                     ui_state = UI_MENU_MAIN;
-                    menu_index = 1; // Return to "Games" selection
+                    menu_index = 1; // 返回 "Games" 选项
                     last_menu_index = -1;
                     continue;
                 }
                 rebuild = true;
             }
             
-            // Render Games Menu
+            // 渲染游戏菜单
             if (rebuild || last_menu_index == -1) {
                 DRAW_Clear();
                 DRAW_AddRect(0, 0, 2047, 2047); 
@@ -1492,15 +1493,15 @@ static void guiTask(void* pvParameters) {
             }
 
         } else if (ui_state == UI_MENU_MUSIC) {
-            // Navigation
+            // 导航
             if (enc_delta != 0) {
                 menu_index += enc_delta;
-                if (menu_index < 0) menu_index = music_file_count; // +1 for Back
+                if (menu_index < 0) menu_index = music_file_count; // +1 用于返回
                 if (menu_index > music_file_count) menu_index = 0;
                 rebuild = true;
             }
             
-            // Selection
+            // 选择
             if (btn_pressed) {
                 if (menu_index == music_file_count) {
                     ui_state = UI_MENU_MAIN;
@@ -1513,14 +1514,14 @@ static void guiTask(void* pvParameters) {
                         last_menu_index = -1;
                         continue;
                     } else {
-                        // Failed to play, stay in menu
-                        // Maybe show error?
+                        // 播放失败，停留在菜单
+                        // 也许显示错误？
                     }
                 }
                 rebuild = true;
             }
             
-            // Render Music Menu
+            // 渲染音乐菜单
             if (rebuild || last_menu_index == -1) {
                 DRAW_Clear();
                 DRAW_AddRect(0, 0, 2047, 2047);
@@ -1529,7 +1530,7 @@ static void guiTask(void* pvParameters) {
                 int spacing = 300;
                 int scale = 30;
                 
-                // Calculate Scroll
+                // 计算滚动
                 if(menu_index < music_scroll) music_scroll = menu_index;
                 if(menu_index >= music_scroll + visible_lines) music_scroll = menu_index - visible_lines + 1;
                 
@@ -1561,42 +1562,42 @@ static void guiTask(void* pvParameters) {
             }
 
         } else if (ui_state == UI_MUSIC_PLAYER) {
-            // Exclusive Audio Loop - Blocking Mode
-            // This ensures maximum CPU time for buffer filling and prevents UI starvation
+            // 独占音频循环 - 阻塞模式
+            // 这确保了缓冲区填充的最大 CPU 时间，并防止 UI 饥饿
             
-            // Clear screen once
+            // 清屏一次
             if (rebuild || last_menu_index == -1) {
                 DRAW_Clear();
-                // Draw a simple "Playing" indicator
+                // 绘制简单的 "Playing" 指示器
                 DRAW_AddString("PLAYING...", 0, 500, 1000, 20, 20);
                 DRAW_Update(); 
                 updateWebUIStatus("MUSIC PLAYER\nPlaying: " + String(music_files[menu_index].c_str()));
                 last_menu_index = 0;
-                // Removed "Wait for release" loop as we now enter on Release
+                // 移除了 "等待释放" 循环，因为我们现在在释放时进入
             }
             
-            // Safety check: If not playing, go back
+            // 安全检查：如果未播放，则返回
             if (!is_playing) {
                 ui_state = UI_MENU_MUSIC;
                 rebuild = true;
             }
 
-            // Enter blocking loop
+            // 进入阻塞循环
             Serial.println("Entering Music Loop");
             
-            // Reset debounce timer
+            // 重置去抖动计时器
             unsigned long low_start = 0;
             
-            // Allocate a 64KB temp buffer in PSRAM for reading
-            // 64KB = 65536 bytes
+            // 在 PSRAM 中分配 64KB 临时缓冲区用于读取
+            // 64KB = 65536 字节
             uint8_t *read_buf = (uint8_t*)ps_malloc(65536);
             if(read_buf == NULL) {
                 Serial.println("Failed to allocate 64KB read buffer!");
                 is_playing = false;
             }
 
-            // Volume Control Init
-            static int volume = 1; // 0-256. Default 1/256
+            // 音量控制初始化
+            static int volume = 1; // 0-256. 默认 1/256
             int32_t last_enc = encoderValue;
             
             while (is_playing && audioFile) {
@@ -1760,15 +1761,15 @@ static void guiTask(void* pvParameters) {
             Serial.println("Exited Music Loop");
             
         } else if (ui_state == UI_MENU_VIDEO) {
-            // Navigation
+            // 导航
             if (enc_delta != 0) {
                 menu_index += enc_delta;
-                if (menu_index < 0) menu_index = video_file_count; // +1 for Back
+                if (menu_index < 0) menu_index = video_file_count; // +1 用于返回
                 if (menu_index > video_file_count) menu_index = 0;
                 rebuild = true;
             }
             
-            // Selection
+            // 选择
             if (btn_pressed) {
                 if (menu_index == video_file_count) {
                     ui_state = UI_MENU_MAIN;
@@ -1781,13 +1782,13 @@ static void guiTask(void* pvParameters) {
                         last_menu_index = -1;
                         continue;
                     } else {
-                        // Failed to play
+                        // 播放失败
                     }
                 }
                 rebuild = true;
             }
             
-            // Render Video Menu
+            // 渲染视频菜单
             if (rebuild || last_menu_index == -1) {
                 DRAW_Clear();
                 DRAW_AddRect(0, 0, 2047, 2047);
@@ -1796,7 +1797,7 @@ static void guiTask(void* pvParameters) {
                 int spacing = 300;
                 int scale = 30;
                 
-                // Calculate Scroll
+                // 计算滚动
                 if(menu_index < music_scroll) music_scroll = menu_index;
                 if(menu_index >= music_scroll + visible_lines) music_scroll = menu_index - visible_lines + 1;
                 
@@ -1828,7 +1829,7 @@ static void guiTask(void* pvParameters) {
             }
 
         } else if (ui_state == UI_VIDEO_PLAYER) {
-            // Exclusive Video Loop
+            // 独占视频循环
             
             if (rebuild || last_menu_index == -1) {
                 DRAW_Clear();
@@ -1852,7 +1853,7 @@ static void guiTask(void* pvParameters) {
                 is_video_playing = false;
             }
 
-            // Volume Control Init (Only for Audio Channels)
+            // 音量控制初始化 (仅用于音频通道)
             static int volume = 1; 
             int32_t last_enc = encoderValue;
             
@@ -2009,30 +2010,30 @@ static void guiTask(void* pvParameters) {
             Serial.println("Exited Video Loop");
             
         } else if (ui_state == UI_MENU_ONLINE) {
-            // Update Network
+            // 更新网络
             Network_Manager::update();
             
-            // Get Peers
+            // 获取对等方
             int peer_count = Network_Manager::getPeerCount();
             const PeerInfo* peers = Network_Manager::getPeers();
             
-            // Navigation
+            // 导航
             if (enc_delta != 0) {
                 menu_index += enc_delta;
-                if (menu_index < 0) menu_index = peer_count; // +1 for Back
+                if (menu_index < 0) menu_index = peer_count; // +1 用于返回
                 if (menu_index > peer_count) menu_index = 0;
                 rebuild = true;
             }
             
-            // Selection
+            // 选择
             if (btn_pressed) {
                 if (menu_index == peer_count) {
                     ui_state = UI_MENU_MAIN;
-                    menu_index = 3; // Return to "Online" selection
+                    menu_index = 3; // 返回 "Online" 选项
                     last_menu_index = -1;
                     continue;
                 } else {
-                    // Pair with selected peer
+                    // 与选定的对等方配对
                     if(peer_count > 0 && menu_index < peer_count) {
                         Network_Manager::pair(peers[menu_index].mac);
                     }
@@ -2040,7 +2041,7 @@ static void guiTask(void* pvParameters) {
                 rebuild = true;
             }
             
-            // Force redraw every 500ms to update status text
+            // 每 500ms 强制重绘以更新状态文本
             static unsigned long last_redraw = 0;
             if (millis() - last_redraw > 500) {
                 rebuild = true;
@@ -2053,7 +2054,7 @@ static void guiTask(void* pvParameters) {
                 
                 DRAW_AddString("ONLINE MODE", 0, 600, 1900, 30, 30);
                 
-                // Show Status
+                // 显示状态
                 NetState state = Network_Manager::getState();
                 const char* status_str = "IDLE";
                 if(state == NET_DISCOVERING) status_str = "SCANNING...";
@@ -2068,24 +2069,24 @@ static void guiTask(void* pvParameters) {
                 
                 String status = "MENU: ONLINE\nStatus: " + String(status_str) + "\n";
 
-                // List Peers
-                for(int i=0; i<peer_count; i++) {
+                // 列出对等方
+                static char peer_strings[20][32];
+                for(int i=0; i<peer_count && i<20; i++) {
                     int y = start_y - (i * spacing);
                     
-                    char peer_str[32];
-                    sprintf(peer_str, "PEER %02X:%02X", peers[i].mac[4], peers[i].mac[5]);
+                    sprintf(peer_strings[i], "PEER %02X:%02X", peers[i].mac[4], peers[i].mac[5]);
 
                     if(i == menu_index) {
                         DRAW_AddString(">", 0, 50, y, scale, scale);
-                        status += "> " + String(peer_str) + "\n";
+                        status += "> " + String(peer_strings[i]) + "\n";
                     } else {
-                        status += "  " + String(peer_str) + "\n";
+                        status += "  " + String(peer_strings[i]) + "\n";
                     }
                     
-                    DRAW_AddString(peer_str, 0, 200, y, scale, scale);
+                    DRAW_AddString(peer_strings[i], 0, 200, y, scale, scale);
                 }
                 
-                // Back Option
+                // 返回选项
                 int back_y = start_y - (peer_count * spacing);
                 if(menu_index == peer_count) {
                     DRAW_AddString(">", 0, 50, back_y, scale, scale);
@@ -2100,7 +2101,7 @@ static void guiTask(void* pvParameters) {
             }
 
         } else if (ui_state == UI_SNAKE) {
-            // Exit
+            // 退出
             if (btn_pressed) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
@@ -2110,11 +2111,11 @@ static void guiTask(void* pvParameters) {
             
             Update_Snake_Game();
             
-            // Always redraw game
+            // 始终重绘游戏
             DRAW_Clear();
             DRAW_AddRect(0, 0, 2047, 2047);
             
-            // Draw Snake
+            // 绘制蛇
             int cell_size = 2048 / SNAKE_GRID_SIZE;
             for(int i=0; i<snake_len; i++) {
                 int x = snake_body[i].x * cell_size + (cell_size/2);
@@ -2123,7 +2124,7 @@ static void guiTask(void* pvParameters) {
                 DRAW_AddRect(x - half_size, y - half_size, 2*half_size, 2*half_size);
             }
             
-            // Draw Food
+            // 绘制食物
             int fx = snake_food.x * cell_size + (cell_size/2);
             int fy = snake_food.y * cell_size + (cell_size/2);
             int f_half = (cell_size / 2) - 10;
@@ -2141,7 +2142,7 @@ static void guiTask(void* pvParameters) {
             }
 
         } else if (ui_state == UI_BREAKOUT) {
-            // Exit
+            // 退出
             if (btn_pressed) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
@@ -2154,14 +2155,14 @@ static void guiTask(void* pvParameters) {
             DRAW_Clear();
             DRAW_AddRect(0, 0, 2047, 2047);
             
-            // Draw Paddle
+            // 绘制挡板
             int py = 100;
             DRAW_AddRect(brk_paddle.x, py, BRK_PADDLE_W, BRK_PADDLE_H);
             
-            // Draw Ball
+            // 绘制球
             DRAW_AddCircle(brk_ball.x, brk_ball.y, BRK_BALL_R);
             
-            // Draw Bricks
+            // 绘制砖块
             int brick_start_y = 1500;
             for(int r=0; r<BRK_ROWS; r++) {
                 for(int c=0; c<BRK_COLS; c++) {
@@ -2171,13 +2172,13 @@ static void guiTask(void* pvParameters) {
                         int bw = BRK_BRICK_W;
                         int bh = BRK_BRICK_H;
                         
-                        // Simple Brick Drawing (Rect)
+                        // 简单的砖块绘制 (矩形)
                         DRAW_AddRect(bx + 2, by + 2, bw - 4, bh - 4);
                     }
                 }
             }
             
-            // Draw Score/Lives
+            // 绘制分数/生命
             if(brk_game_over) {
                 if(brk_game_over == 2) {
                     DRAW_AddString("YOU WIN", 0, 600, 1100, 20, 20);
@@ -2197,7 +2198,7 @@ static void guiTask(void* pvParameters) {
             }
 
         } else if (ui_state == UI_FLAPPY) {
-            // Exit
+            // 退出
             if (btn_pressed) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
@@ -2205,11 +2206,11 @@ static void guiTask(void* pvParameters) {
                 continue;
             }
             
-            // Input
+            // 输入
             bool current_touch_up = (touchRead(TOUCH_UP) > touch_base_up + TOUCH_DELTA);
             int jump = 0;
             
-            // Web Input
+            // Web 输入
             if (web_game_dir == 0) {
                 jump = 1;
                 web_game_dir = -1;
@@ -2225,13 +2226,13 @@ static void guiTask(void* pvParameters) {
             DRAW_Clear();
             DRAW_AddRect(0, 0, 2047, 2047);
             
-            // Draw Player
+            // 绘制玩家
             DRAW_AddCircle(FLP_PLAYER_X, flp_player.y, FLP_PLAYER_R);
-            // Antennas
+            // 天线
             DRAW_AddLine(FLP_PLAYER_X - 20, flp_player.y + 30, FLP_PLAYER_X - 40, flp_player.y + 75);
             DRAW_AddLine(FLP_PLAYER_X + 20, flp_player.y + 30, FLP_PLAYER_X + 40, flp_player.y + 75);
             
-            // Draw Obstacles
+            // 绘制障碍物
             for(int i=0; i<FLP_MAX_OBSTACLES; i++) {
                 if(flp_obstacles[i].active) {
                     int x = flp_obstacles[i].x;
@@ -2239,13 +2240,13 @@ static void guiTask(void* pvParameters) {
                     int w = FLP_OBSTACLE_W;
                     int h_gap = FLP_GAP_H / 2;
                     
-                    // Top Obstacle
+                    // 顶部障碍物
                     int top_y = gap_y + h_gap;
                     if(top_y < 2048) {
                         DRAW_AddRect(x, top_y, w, 2048 - top_y);
                     }
                     
-                    // Bottom Obstacle
+                    // 底部障碍物
                     int bot_y = gap_y - h_gap;
                     if(bot_y > 0) {
                         DRAW_AddRect(x, 0, w, bot_y);
@@ -2253,7 +2254,7 @@ static void guiTask(void* pvParameters) {
                 }
             }
             
-            // Score
+            // 分数
             if(flp_game_over) {
                 DRAW_AddString("GAME OVER", 0, 500, 1100, 20, 20);
                 char score_str[32];
@@ -2266,7 +2267,7 @@ static void guiTask(void* pvParameters) {
             }
 
         } else if (ui_state == UI_RACING) {
-            // Exit
+            // 退出
             if (btn_pressed) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
@@ -2279,19 +2280,19 @@ static void guiTask(void* pvParameters) {
             DRAW_Clear();
             DRAW_AddRect(0, 0, 2047, 2047);
             
-            // Draw Car
+            // 绘制赛车
             DRAW_AddRect(race_car.x, 100, RACE_CAR_W, RACE_CAR_H);
-            // Add some detail to car (wheels)
+            // 添加一些细节 (车轮)
             DRAW_AddRect(race_car.x - 25, 125, 25, 75);
             DRAW_AddRect(race_car.x + RACE_CAR_W, 125, 25, 75);
             DRAW_AddRect(race_car.x - 25, 250, 25, 75);
             DRAW_AddRect(race_car.x + RACE_CAR_W, 250, 25, 75);
             
-            // Draw Obstacles
+            // 绘制障碍物
             for(int i=0; i<RACE_MAX_OBSTACLES; i++) {
                 if(race_obstacles[i].active) {
                     DRAW_AddRect(race_obstacles[i].x, race_obstacles[i].y, RACE_OBSTACLE_W, RACE_OBSTACLE_H);
-                    // Draw X inside obstacle
+                    // 在障碍物内绘制 X
                     DRAW_AddLine(race_obstacles[i].x, race_obstacles[i].y, race_obstacles[i].x + RACE_OBSTACLE_W, race_obstacles[i].y + RACE_OBSTACLE_H);
                     DRAW_AddLine(race_obstacles[i].x, race_obstacles[i].y + RACE_OBSTACLE_H, race_obstacles[i].x + RACE_OBSTACLE_W, race_obstacles[i].y);
                 }
@@ -2379,12 +2380,12 @@ static void guiTask(void* pvParameters) {
             }
 
         } else if (ui_state == UI_TANK) {
-            // Exit
+            // 退出
             if (btn_pressed) {
                 ui_state = UI_MENU_GAMES;
                 rebuild = true;
                 last_menu_index = -1;
-                Network_Manager::endGame(0); // Reason 0 = Quit
+                Network_Manager::endGame(0); // 原因 0 = 退出
                 continue;
             }
             
@@ -2393,37 +2394,37 @@ static void guiTask(void* pvParameters) {
             DRAW_Clear();
             DRAW_AddRect(0, 0, 2047, 2047);
             
-            // Draw Map
+            // 绘制地图
             for(int i=0; i<TANK_MAP_SIZE; i++) {
-                if(tank_map[i].type == 0) { // Wall
+                if(tank_map[i].type == 0) { // 墙
                     DRAW_AddRect(tank_map[i].x, tank_map[i].y, tank_map[i].w, tank_map[i].h);
-                    // Cross hatch for wall
+                    // 墙的交叉阴影
                     DRAW_AddLine(tank_map[i].x, tank_map[i].y, tank_map[i].x + tank_map[i].w, tank_map[i].y + tank_map[i].h);
                     DRAW_AddLine(tank_map[i].x, tank_map[i].y + tank_map[i].h, tank_map[i].x + tank_map[i].w, tank_map[i].y);
-                } else { // Water
+                } else { // 水
                     DRAW_AddRect(tank_map[i].x, tank_map[i].y, tank_map[i].w, tank_map[i].h);
-                    // Waves for water
+                    // 水的波浪
                     int y_mid = tank_map[i].y + tank_map[i].h/2;
                     DRAW_AddLine(tank_map[i].x, y_mid, tank_map[i].x + tank_map[i].w, y_mid);
                 }
             }
             
-            // Draw Tank
-            // Body (Rect rotated)
+            // 绘制坦克
+            // 车身 (旋转矩形)
             float cos_a = cos(my_tank.angle);
             float sin_a = sin(my_tank.angle);
             
-            // Tank Dimensions
+            // 坦克尺寸
             float w = 60;
             float h = 80;
             
-            // 4 Corners relative to center
+            // 相对于中心的 4 个角
             float x1 = -w/2, y1 = -h/2;
             float x2 = w/2, y2 = -h/2;
             float x3 = w/2, y3 = h/2;
             float x4 = -w/2, y4 = h/2;
             
-            // Rotate and Translate
+            // 旋转和平移
             auto rotX = [&](float x, float y) { return my_tank.x + x*cos_a - y*sin_a; };
             auto rotY = [&](float x, float y) { return my_tank.y + x*sin_a + y*cos_a; };
             
@@ -2437,7 +2438,7 @@ static void guiTask(void* pvParameters) {
             DRAW_AddLine(rx3, ry3, rx4, ry4);
             DRAW_AddLine(rx4, ry4, rx1, ry1);
             
-            // Turret (Box)
+            // 炮塔 (盒子)
             float tw = 30, th = 30;
             float tx1 = -tw/2, ty1 = -th/2;
             float tx2 = tw/2, ty2 = -th/2;
@@ -2449,23 +2450,23 @@ static void guiTask(void* pvParameters) {
             DRAW_AddLine(rotX(tx3, ty3), rotY(tx3, ty3), rotX(tx4, ty4), rotY(tx4, ty4));
             DRAW_AddLine(rotX(tx4, ty4), rotY(tx4, ty4), rotX(tx1, ty1), rotY(tx1, ty1));
             
-            // Barrel (Line)
+            // 炮管 (线)
             DRAW_AddLine(my_tank.x, my_tank.y, my_tank.x + 100*cos_a, my_tank.y + 100*sin_a);
             
-            // Draw Bullets
+            // 绘制子弹
             for(int i=0; i<TANK_MAX_BULLETS; i++) {
                 if(tank_bullets[i].active) {
                     DRAW_AddCircle(tank_bullets[i].x, tank_bullets[i].y, 5);
                 }
             }
 
-            // Draw Remote Tank
+            // 绘制远程坦克
             TankData remoteData;
             if(Network_Manager::getRemoteGameData(&remoteData)) {
                 float r_cos = cos(remoteData.angle);
                 float r_sin = sin(remoteData.angle);
                 
-                // Remote Tank Body
+                // 远程坦克车身
                 auto rRotX = [&](float x, float y) { return remoteData.x + x*r_cos - y*r_sin; };
                 auto rRotY = [&](float x, float y) { return remoteData.y + x*r_sin + y*r_cos; };
                 
@@ -2479,16 +2480,16 @@ static void guiTask(void* pvParameters) {
                 DRAW_AddLine(rx3, ry3, rx4, ry4);
                 DRAW_AddLine(rx4, ry4, rx1, ry1);
                 
-                // Remote Turret
+                // 远程炮塔
                 DRAW_AddLine(rRotX(tx1, ty1), rRotY(tx1, ty1), rRotX(tx2, ty2), rRotY(tx2, ty2));
                 DRAW_AddLine(rRotX(tx2, ty2), rRotY(tx2, ty2), rRotX(tx3, ty3), rRotY(tx3, ty3));
                 DRAW_AddLine(rRotX(tx3, ty3), rRotY(tx3, ty3), rRotX(tx4, ty4), rRotY(tx4, ty4));
                 DRAW_AddLine(rRotX(tx4, ty4), rRotY(tx4, ty4), rRotX(tx1, ty1), rRotY(tx1, ty1));
                 
-                // Remote Barrel
+                // 远程炮管
                 DRAW_AddLine(remoteData.x, remoteData.y, remoteData.x + 100*r_cos, remoteData.y + 100*r_sin);
                 
-                // Remote Bullets
+                // 远程子弹
                 for(int i=0; i<remoteData.bullet_count; i++) {
                     DRAW_AddCircle(remoteData.bullets[i].x, remoteData.bullets[i].y, 5);
                 }
@@ -2511,7 +2512,7 @@ static void guiTask(void* pvParameters) {
                     status += "YOU WIN\n";
                 }
                 
-                // Auto exit after 2 seconds
+                // 2 秒后自动退出
                 static unsigned long exit_timer = 0;
                 if(exit_timer == 0) exit_timer = millis();
                 if(millis() - exit_timer > 2000) {
@@ -2549,30 +2550,30 @@ static void guiTask(void* pvParameters) {
                 DRAW_AddString("DISPLAY SYSTEM", 0, 540, 1050, 30, 30);
                 DRAW_AddString("V1.0", 0, 885, 800, 30, 30);
                 updateWebUIStatus("ABOUT\nESP32 VECTOR\nDISPLAY SYSTEM\nV1.0");
-                last_menu_index = 0; // Mark as drawn
+                last_menu_index = 0; // 标记为已绘制
             }
         }
 
-        // Update animations and Render
+        // 更新动画并渲染
         DRAW_Update();
         DRAW_Render();
 
-        vTaskDelay(pdMS_TO_TICKS(40)); // 25Hz update rate
+        vTaskDelay(pdMS_TO_TICKS(40)); // 25Hz 更新率
     }
 }
 
 static void serialOutputTask(void* pvParameters) {
   unsigned long lastOutputTime = 0;
-  const unsigned long outputInterval = 200; // 200ms interval
-  
+  const unsigned long outputInterval = 200; // 200ms 间隔
+  //循环输出触摸值
   for (;;) {
     if (millis() - lastOutputTime >= outputInterval) {
       lastOutputTime = millis();
-      /* Serial.printf("Touch(Cap): U=%d D=%d L=%d R=%d\n", 
+      Serial.printf("Touch(Cap): U=%d D=%d L=%d R=%d\n", 
         touchRead(TOUCH_UP), 
         touchRead(TOUCH_DOWN), 
         touchRead(TOUCH_LEFT), 
-        touchRead(TOUCH_RIGHT)); */
+        touchRead(TOUCH_RIGHT));
     }
     vTaskDelay(pdMS_TO_TICKS(50));
   }

@@ -7,15 +7,15 @@
 
 static uint8_t drawStepSize = 16; // 默认步长
 
-// --- DMA Mode Globals ---
+// --- DMA 模式全局变量 ---
 static DrawMode currentDrawMode = DRAW_MODE_CPU;
-// DMA Buffer: Stores packed X (high 16) and Y (low 16)
-// Double buffering for DMA to avoid tearing
+// DMA 缓冲区：存储打包的 X (高16位) 和 Y (低16位)
+// DMA 双缓冲以避免画面撕裂
 static uint32_t* dmaBuffers[2] = {NULL, NULL};
 static uint32_t dmaBufferCounts[2] = {0, 0};
 static size_t dmaBufferCapacity = 0;
-static volatile uint8_t activeDmaIdx = 0; // ISR reads from this
-static uint8_t backDmaIdx = 1;            // updateFrame writes to this
+static volatile uint8_t activeDmaIdx = 0; // ISR 从此处读取
+static uint8_t backDmaIdx = 1;            // updateFrame 写入此处
 static volatile uint32_t dmaReadIndex = 0;
 
 // --- 数据结构 ---
@@ -30,12 +30,12 @@ enum ShapeType {
 struct Shape {
     ShapeType type;
     int16_t x, y;
-    int16_t param1, param2; // Line: x1, y1. Rect: w, h. Circle: r, unused.
-    // String specific extensions
+    int16_t param1, param2; // 线段: x1, y1. 矩形: w, h. 圆: r, 未使用.
+    // 字符串特定扩展
     uint16_t scale_x, scale_y;
     uint16_t spacing;
-    const char* text;       // For SHAPE_STRING
-    int32_t scroll;         // For scrolling text
+    const char* text;       // 用于 SHAPE_STRING
+    int32_t scroll;         // 用于滚动文本
 };
 
 // --- 全局变换 ---
@@ -174,24 +174,25 @@ static const Line_t pattern_lt[] = { {2600,3295,1200,1795}, {1200,1795,2600,295}
 static const Line_t pattern_gt[] = { {1200,3295,2600,1795}, {2600,1795,1200,295} }; // >
 static const Line_t pattern_pipe[] = { {2100,3295,2100,295} }; // |
 static const Line_t pattern_tilde[] = { {1200,1295,1600,2295}, {1600,2295,2200,1295}, {2200,1295,2600,2295} }; // ~
+
 // --- 对象池 ---
-Shape shapePool[MAX_SHAPES];
-uint16_t shapeCount = 0;
+Shape shapePool[MAX_SHAPES]; // 形状对象池
+uint16_t shapeCount = 0;     // 当前形状数量
 
 // --- 双缓冲底层线段 ---
 // rawLines[bufferIndex][lineIndex][0=x0, 1=y0, 2=x1, 3=y1]
 uint16_t rawLines[2][MAX_RAW_LINES][4];
 volatile uint16_t rawLineCounts[2] = {0, 0};
-volatile uint8_t activeBufferIdx = 0; // 当前 ISR 使用的缓冲区
-volatile uint8_t backBufferIdx = 1;   // 当前 updateFrame 写入的缓冲区
+volatile uint8_t activeBufferIdx = 0; // 当前ISR使用的缓冲区
+volatile uint8_t backBufferIdx = 1;   // 当前updateFrame写入的缓冲区
 
 // --- 运行时状态 ---
-volatile uint16_t currentLineIndex = 0;
+volatile uint16_t currentLineIndex = 0; // 当前线段索引
 
 // 定点数插值变量 (16.16格式)
-int32_t curr_x_fp, curr_y_fp; 
-int32_t inc_x_fp, inc_y_fp;   
-uint16_t steps_remaining;     
+int32_t curr_x_fp, curr_y_fp; // 当前坐标（定点数）
+int32_t inc_x_fp, inc_y_fp;   // 增量（定点数）
+uint16_t steps_remaining;     // 剩余步数
 
 // 辅助函数：计算绝对值
 inline int16_t i_abs(int16_t v) { return v < 0 ? -v : v; }
@@ -206,8 +207,8 @@ void DRAW_SetMode(DrawMode mode) {
     currentDrawMode = mode;
     if (mode == DRAW_MODE_DMA) {
         if (dmaBuffers[0] == NULL) {
-            // Allocate 1MB for each buffer (250k points)
-            // 250k points * 4 bytes = 1MB.
+            // 为每个缓冲区分配 1MB (250k 点)
+            // 250k 点 * 4 字节 = 1MB.
             size_t size = 1024 * 1024; 
             dmaBuffers[0] = (uint32_t*)heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
             dmaBuffers[1] = (uint32_t*)heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
@@ -215,7 +216,7 @@ void DRAW_SetMode(DrawMode mode) {
             if (dmaBuffers[0] && dmaBuffers[1]) {
                 dmaBufferCapacity = size / 4;
             } else {
-                // Allocation failed
+                // 分配失败
                 if (dmaBuffers[0]) free(dmaBuffers[0]);
                 if (dmaBuffers[1]) free(dmaBuffers[1]);
                 dmaBuffers[0] = NULL;
@@ -264,10 +265,10 @@ void DRAW_AddCircle(int32_t x, int32_t y, int32_t r) {
 
 void DRAW_SetLetter(char c) {
     DRAW_Clear();
-    // Create a static string buffer for single char
+    // 为单个字符创建静态字符串缓冲区
     static char buf[2] = {0, 0};
     buf[0] = c;
-    // Center it roughly
+    // 粗略居中
     DRAW_AddString(buf, 0, 2048, 2048, 100, 100);
 }
 
@@ -293,7 +294,7 @@ int16_t DRAW_AddString(const char *s, uint16_t spacing, int32_t x, int32_t y, ui
     shapePool[slot].scroll = 0;
     shapePool[slot].text = s;
     
-    // Calculate total width and store in param1
+    // 计算总宽度并存储在 param1 中
     int32_t width = 0;
     const char* p = s;
     while (*p) {
@@ -316,7 +317,7 @@ int16_t DRAW_AddString(const char *s, uint16_t spacing, int32_t x, int32_t y, ui
         }
         p++;
     }
-    shapePool[slot].param1 = (int16_t)width; // Store width
+    shapePool[slot].param1 = (int16_t)width; // 存储宽度
     
     shapeCount++;
     return slot;
@@ -336,21 +337,21 @@ void DRAW_SetTextScroll(int16_t slot, int32_t scroll) {
 }
 
 void DRAW_Update(void) {
-    // Handle scrolling
+    // 处理滚动
     for (uint16_t i = 0; i < shapeCount; i++) {
         Shape *s = &shapePool[i];
         if (s->type == SHAPE_STRING) {
-            int32_t width = s->param1; // Retrieved cached width
-            // Check if text extends beyond right edge (2047)
-            // If x + width > 2047, enable scrolling
+            int32_t width = s->param1; // 获取缓存的宽度
+            // 检查文本是否超出右边缘 (2047)
+            // 如果 x + width > 2047，启用滚动
             if (s->x + width > 2047) {
-                s->scroll += 10; // Scroll speed
+                s->scroll += 10; // 滚动速度
                 
-                // If scrolled completely off-screen to the left
+                // 如果完全滚动到屏幕左侧之外
                 // render_x = x - scroll
                 // if render_x + width < 0 => x - scroll + width < 0
                 if (s->x - s->scroll + width < 0) {
-                    // Reset to appear from right edge
+                    // 重置为从右边缘出现
                     // render_x = 2047 => x - scroll = 2047 => scroll = x - 2047
                     s->scroll = s->x - 2047;
                 }
@@ -363,7 +364,7 @@ void DRAW_Terminal_Init(uint16_t scale_pct, int32_t spacing) {
     DRAW_Clear();
     term_scale_pct = scale_pct;
     term_spacing = spacing;
-    term_cursor_y = 4096 - 200; // Start from top
+    term_cursor_y = 4096 - 200; // 从顶部开始
 }
 
 void DRAW_Terminal_SetSpacing(int32_t spacing) {
@@ -371,14 +372,14 @@ void DRAW_Terminal_SetSpacing(int32_t spacing) {
 }
 
 void DRAW_Terminal_Print(const char *str) {
-    // Simple terminal: add string at current cursor Y and move down
-    // Note: str must be persistent! If it's a temporary buffer, this will fail.
-    // Assuming str is a string literal or managed externally for now.
+    // 简单终端：在当前光标 Y 处添加字符串并向下移动
+    // 注意：str 必须是持久的！如果是临时缓冲区，这将失败。
+    // 暂时假设 str 是字符串字面量或外部管理的。
     
     DRAW_AddString(str, 0, 100, term_cursor_y, term_scale_pct, term_scale_pct);
     term_cursor_y -= term_line_height;
     
-    // Wrap around or clear? For now, just let it go off screen or reset
+    // 换行或清除？目前只是让它离开屏幕或重置
     if (term_cursor_y < 0) {
         DRAW_Clear();
         term_cursor_y = 4096 - 200;
@@ -388,7 +389,7 @@ void DRAW_Terminal_Print(const char *str) {
 static CharPattern _getPattern(char c) {
     CharPattern cp = {NULL, 0, false};
     
-    // Macros for brevity
+    // 宏以简洁代码
     #define P(x) pattern_##x
     #define S(x) (sizeof(P(x))/sizeof(Line_t))
     #define C(char_val, pat_suffix) case char_val: cp.lines = P(pat_suffix); cp.count = S(pat_suffix); break;
@@ -432,7 +433,7 @@ void _addRawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
 }
 
 void _addDmaPoint(int16_t x, int16_t y) {
-    // Filter invalid points
+    // 过滤无效点
     if (x < 0 || x > 2047 || y < 0 || y > 2047) return;
 
     if (dmaBuffers[backDmaIdx] && dmaBufferCounts[backDmaIdx] < dmaBufferCapacity) {
@@ -456,17 +457,17 @@ void _rasterizeLineToDMA(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
 }
 
 void _processLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
-    // Apply global transform
+    // 应用全局变换
     int32_t tx0 = (int32_t)x0 * global_scale_x_pct / 100 + global_offset_x;
     int32_t ty0 = (int32_t)y0 * global_scale_y_pct / 100 + global_offset_y;
     int32_t tx1 = (int32_t)x1 * global_scale_x_pct / 100 + global_offset_x;
     int32_t ty1 = (int32_t)y1 * global_scale_y_pct / 100 + global_offset_y;
 
-    // Clip to 12-bit DAC range (0-4095) roughly, or let it wrap?
-    // For now, just cast back to int16_t.
+    // 裁剪到 12 位 DAC 范围 (0-4095) 大致范围，或者让它回绕？
+    // 目前，只需转换回 int16_t。
     
-    // Trivial Rejection: If both points are outside on the same side, discard.
-    // This allows lines that partially enter the screen or cross it.
+    // 简单剔除：如果两个点都在同一侧外部，则丢弃。
+    // 这允许部分进入屏幕或穿过屏幕的线段。
     if ((tx0 < 0 && tx1 < 0) || (tx0 > 2047 && tx1 > 2047) || 
         (ty0 < 0 && ty1 < 0) || (ty0 > 2047 && ty1 > 2047)) {
         return;
@@ -527,7 +528,7 @@ void DRAW_Render() {
             int16_t cx = s->x;
             int16_t cy = s->y;
             int16_t r = s->param1;
-            // Draw circle using 16 segments
+            // 使用 16 个线段绘制圆
             const int segs = 16;
             int16_t lastX = cx + r;
             int16_t lastY = cy;
@@ -540,12 +541,12 @@ void DRAW_Render() {
                 lastY = nextY;
             }
         } else if (s->type == SHAPE_STRING && s->text != NULL) {
-            int16_t cursorX = s->x - (int16_t)s->scroll; // Apply scroll to X (Horizontal Marquee)
+            int16_t cursorX = s->x - (int16_t)s->scroll; // 应用滚动到 X (水平跑马灯)
             int16_t cursorY = s->y; 
-            // Use new scale fields if available (param1 was old scale)
-            // If param1 is set (old API), use it. If scale_x/y set (new API), use them.
-            // Actually, addString sets param1, DRAW_AddString sets scale_x/y.
-            // Let's unify: addString sets scale_x=scale_y=scale.
+            // 如果可用，使用新的缩放字段 (param1 是旧的缩放)
+            // 如果设置了 param1 (旧 API)，则使用它。如果设置了 scale_x/y (新 API)，则使用它们。
+            // 实际上，addString 设置 param1，DRAW_AddString 设置 scale_x/y。
+            // 让我们统一：addString 设置 scale_x=scale_y=scale。
             uint16_t sx = s->scale_x;
             uint16_t sy = s->scale_y;
             
@@ -553,7 +554,7 @@ void DRAW_Render() {
             
             while (*p) {
                 if (*p == ' ') {
-                    cursorX += 4 * sx; // Space width
+                    cursorX += 4 * sx; // 空格宽度
                 } else {
                     CharPattern cp = _getPattern(*p);
                     if (cp.lines) {
@@ -584,7 +585,7 @@ void DRAW_Render() {
                         float width = max_x - min_x;
                         if (width < 1.0f) width = 4.0f; 
                         
-                        // Use custom spacing if set, else default calculation
+                        // 如果设置了自定义间距，则使用它，否则使用默认计算
                         if (s->spacing > 0) {
                              cursorX += s->spacing;
                         } else {
@@ -669,8 +670,8 @@ void IRAM_ATTR DRAW_GetNextPoint(uint16_t &outX, uint16_t &outY) {
     if (currentDrawMode == DRAW_MODE_DMA) {
         if (dmaBuffers[activeDmaIdx] && dmaBufferCounts[activeDmaIdx] > 0) {
             uint32_t val = dmaBuffers[activeDmaIdx][dmaReadIndex];
-            // Decode and scale to 16-bit DAC range (0..2047 -> 0..65504)
-            // Same scaling as CPU mode: x << 5
+            // 解码并缩放到 16 位 DAC 范围 (0..2047 -> 0..65504)
+            // 与 CPU 模式相同的缩放：x << 5
             int16_t x = (int16_t)(val >> 16);
             int16_t y = (int16_t)(val & 0xFFFF);
             outX = (uint16_t)(x << 5);
@@ -681,24 +682,24 @@ void IRAM_ATTR DRAW_GetNextPoint(uint16_t &outX, uint16_t &outY) {
                 dmaReadIndex = 0;
             }
         } else {
-            outX = 32768; // Center
+            outX = 32768; // 中心
             outY = 32768;
         }
         return;
     }
 
-    // CPU Mode with Point Filtering
+    // 带点过滤的 CPU 模式
     int points_checked = 0;
-    while (points_checked < 50) { // Limit checks to prevent ISR hang
+    while (points_checked < 50) { // 限制检查以防止 ISR 挂起
         points_checked++;
 
-        // 1. Get current point (unscaled)
+        // 1. 获取当前点 (未缩放)
         int16_t x = (int16_t)(curr_x_fp >> 16);
         int16_t y = (int16_t)(curr_y_fp >> 16);
         
         bool point_valid = (x >= 0 && x <= 2047 && y >= 0 && y <= 2047);
         
-        // 2. Advance logic
+        // 2. 推进逻辑
         bool line_finished = false;
         if (steps_remaining == 0) {
             line_finished = true;
@@ -708,7 +709,7 @@ void IRAM_ATTR DRAW_GetNextPoint(uint16_t &outX, uint16_t &outY) {
             steps_remaining--;
         }
 
-        // 3. If valid, output and return
+        // 3. 如果有效，输出并返回
         if (point_valid) {
             outX = (uint16_t)(x << 5);
             outY = (uint16_t)(y << 5);
@@ -724,7 +725,7 @@ void IRAM_ATTR DRAW_GetNextPoint(uint16_t &outX, uint16_t &outY) {
             return;
         }
 
-        // 4. If invalid, we skipped. Handle line finish.
+        // 4. 如果无效，我们跳过。处理线段结束。
         if (line_finished) {
             currentLineIndex++;
             uint16_t total = rawLineCounts[activeBufferIdx];
@@ -733,14 +734,14 @@ void IRAM_ATTR DRAW_GetNextPoint(uint16_t &outX, uint16_t &outY) {
             }
             _resetLine();
             
-            // If buffer empty, break
+            // 如果缓冲区为空，中断
             if (rawLineCounts[activeBufferIdx] == 0) {
                 break;
             }
         }
     }
     
-    // Fallback if no valid point found
+    // 如果没有找到有效点，则回退
     outX = 32768;
     outY = 32768;
 }

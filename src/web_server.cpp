@@ -3,12 +3,16 @@
 #include <LittleFS.h>
 #include "freertos.h"
 
+// Web服务器对象，端口80
 WebServer server(80);
+// 当前UI状态字符串
 String current_ui_status = "{}";
 
-const char* html = R"rawliteral(
+// HTML页面内容
+const char* html = u8R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
+  <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     body { 
@@ -81,64 +85,75 @@ const char* html = R"rawliteral(
 </html>
 )rawliteral";
 
+// 处理根路径请求
 void handleRoot() {
-  server.send(200, "text/html", html);
+  server.send(200, "text/html; charset=utf-8", html);
 }
 
+// 处理状态查询请求
 void handleStatus() {
-  server.send(200, "text/plain", current_ui_status);
+  server.send(200, "text/plain; charset=utf-8", current_ui_status);
 }
 
+// 更新Web UI状态
 void updateWebUIStatus(String status) {
     current_ui_status = status;
 }
 
+// 处理向上按钮
 void handleUp() {
-  web_enc_delta = -1; // Menu Up / Prev
-  web_game_dir = 0;   // Snake Up
+  web_enc_delta = -1; // 菜单向上/上一个
+  web_game_dir = 0;   // 贪吃蛇向上
   server.send(200, "text/plain", "OK");
 }
 
+// 处理向下按钮
 void handleDown() {
-  web_enc_delta = 1;  // Menu Down / Next
-  web_game_dir = 1;   // Snake Down
+  web_enc_delta = 1;  // 菜单向下/下一个
+  web_game_dir = 1;   // 贪吃蛇向下
   server.send(200, "text/plain", "OK");
 }
 
+// 处理向左按钮
 void handleLeft() {
-  web_enc_delta = -5; // Volume Down (Faster)
-  web_game_dir = 2;   // Snake Left
+  web_enc_delta = -5; // 音量减小（更快）
+  web_game_dir = 2;   // 贪吃蛇向左
   server.send(200, "text/plain", "OK");
 }
 
+// 处理向右按钮
 void handleRight() {
-  web_enc_delta = 5;  // Volume Up (Faster)
-  web_game_dir = 3;   // Snake Right
+  web_enc_delta = 5;  // 音量增加（更快）
+  web_game_dir = 3;   // 贪吃蛇向右
   server.send(200, "text/plain", "OK");
 }
 
+// 处理确认按钮
 void handleEnter() {
   web_btn_pressed = true;
   server.send(200, "text/plain", "OK");
 }
 
+// Web服务器任务函数
 void webServerTask(void* pvParameters) {
+  // 获取MAC地址并生成SSID
   uint8_t mac[6];
   WiFi.macAddress(mac);
   char ssid[32];
   sprintf(ssid, "ESP32_Game_%02X:%02X", mac[4], mac[5]);
   
+  // 启动AP模式
   WiFi.softAP(ssid, "12345678");
   IPAddress myIP = WiFi.softAPIP();
   Serial.print("AP IP address: ");
   Serial.println(myIP);
 
-  // Initialize LittleFS
+  // 初始化LittleFS文件系统
   if(!LittleFS.begin(true)){
       Serial.println("An Error has occurred while mounting LittleFS");
   } else {
       Serial.println("LittleFS mounted successfully");
-      // List files for debugging
+      // 列出文件用于调试
       File root = LittleFS.open("/");
       File file = root.openNextFile();
       while(file){
@@ -148,6 +163,7 @@ void webServerTask(void* pvParameters) {
       }
   }
 
+  // 注册URL处理函数
   server.on("/", handleRoot);
   server.on("/status", handleStatus);
   server.on("/up", handleUp);
@@ -156,18 +172,21 @@ void webServerTask(void* pvParameters) {
   server.on("/right", handleRight);
   server.on("/enter", handleEnter);
   
-  // Serve background image
+  // 提供背景图片静态文件
   server.serveStatic("/background.jpg", LittleFS, "/background.jpg");
 
+  // 启动服务器
   server.begin();
   Serial.println("HTTP server started");
 
+  // 主循环：处理客户端请求
   while (1) {
     server.handleClient();
     vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
 
+// 初始化Web服务器
 void initWebServer() {
   xTaskCreatePinnedToCore(
     webServerTask,
@@ -176,6 +195,6 @@ void initWebServer() {
     NULL,
     1,
     NULL,
-    0 // Core 0
+    0 // 核心0
   );
 }

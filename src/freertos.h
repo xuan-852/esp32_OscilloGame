@@ -6,10 +6,10 @@ extern "C" {
 
 void initTasks();
 
-// Web Control Interface
+// Web 控制接口
 extern volatile int web_enc_delta;
 extern volatile bool web_btn_pressed;
-extern volatile int web_game_dir; // -1: None, 0:UP, 1:DOWN, 2:LEFT, 3:RIGHT
+extern volatile int web_game_dir; // -1: 无, 0:上, 1:下, 2:左, 3:右
 
 
 #ifdef __cplusplus

@@ -2,40 +2,42 @@
 #include <WiFi.h>
 #include <esp_now.h>
 
-static NetState current_state = NET_IDLE;
-static std::vector<PeerInfo> discovered_peers;
-static uint8_t my_mac[6];
-static char my_name[16];
+// 网络状态变量
+static NetState current_state = NET_IDLE;                    // 当前网络状态
+static std::vector<PeerInfo> discovered_peers;              // 发现的设备列表
+static uint8_t my_mac[6];                                   // 本机MAC地址
+static char my_name[16];                                    // 本机名称
 
-// Connection details
-static uint8_t connected_peer_mac[6];
-static uint8_t pending_peer_mac[6]; // For incoming/outgoing requests
-static unsigned long last_broadcast_time = 0;
-static const unsigned long BROADCAST_INTERVAL = 500; // 500ms
-static const unsigned long PEER_TIMEOUT = 3000; // 3s timeout for peers
+// 连接详情
+static uint8_t connected_peer_mac[6];                       // 已连接设备的MAC地址
+static uint8_t pending_peer_mac[6];                         // 待处理连接设备的MAC地址
+static unsigned long last_broadcast_time = 0;               // 上次广播时间
+static const unsigned long BROADCAST_INTERVAL = 500;        // 广播间隔: 500ms
+static const unsigned long PEER_TIMEOUT = 3000;             // 设备超时时间: 3s
 
-// Game State
-static volatile bool game_request_pending = false;
-static volatile uint8_t game_request_id = 0;
-static volatile uint32_t game_request_seed = 0;
-static TankData remote_tank_data;
-static volatile bool remote_game_ended = false;
-static volatile uint8_t remote_game_end_reason = 0;
+// 游戏状态
+static volatile bool game_request_pending = false;          // 游戏请求待处理标志
+static volatile uint8_t game_request_id = 0;                // 游戏请求ID
+static volatile uint32_t game_request_seed = 0;             // 游戏随机种子
+static TankData remote_tank_data;                           // 远程坦克数据
+static volatile bool remote_game_ended = false;             // 远程游戏结束标志
+static volatile uint8_t remote_game_end_reason = 0;         // 远程游戏结束原因
 
-// Callbacks
+// ESP-NOW数据发送回调函数
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-    // Handle send status if needed
+    // 处理发送状态（如果需要）
 }
 
+// ESP-NOW数据接收回调函数
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     if (len != sizeof(NetMessage)) return;
     
     NetMessage *msg = (NetMessage *)incomingData;
     
-    // 1. Discovery
+    // 1. 发现消息
     if (msg->type == MSG_DISCOVERY) {
         if (current_state == NET_DISCOVERING) {
-            // Check if exists
+            // 检查是否已存在
             bool found = false;
             for (auto &p : discovered_peers) {
                 if (memcmp(p.mac, msg->src_mac, 6) == 0) {
@@ -53,20 +55,20 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
             }
         }
     }
-    // 2. Pair Request
+    // 2. 配对请求
     else if (msg->type == MSG_PAIR_REQUEST) {
         if (current_state == NET_DISCOVERING || current_state == NET_IDLE) {
-            // Auto-accept for simplicity in this demo
-            // In a real app, we would show a prompt
+            // 自动接受（简化演示）
+            // 在实际应用中，会显示提示
             
-            // Send Accept
+            // 发送接受消息
             if (!esp_now_is_peer_exist(msg->src_mac)) {
                 esp_now_peer_info_t peerInfo;
                 memset(&peerInfo, 0, sizeof(peerInfo));
                 memcpy(peerInfo.peer_addr, msg->src_mac, 6);
                 peerInfo.channel = 0;  
                 peerInfo.encrypt = false;
-                peerInfo.ifidx = WIFI_IF_AP; // Use AP interface since we are in AP_STA mode and AP is active
+                peerInfo.ifidx = WIFI_IF_AP; // 使用AP接口
                 esp_now_add_peer(&peerInfo);
             }
             
@@ -80,27 +82,27 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
             current_state = NET_CONNECTED;
         }
     }
-    // 3. Pair Accept
+    // 3. 配对接受
     else if (msg->type == MSG_PAIR_ACCEPT) {
         if (current_state == NET_PAIRING) {
              memcpy(connected_peer_mac, msg->src_mac, 6);
              current_state = NET_CONNECTED;
         }
     }
-    // 4. Disconnect
+    // 4. 断开连接
     else if (msg->type == MSG_DISCONNECT) {
         if (current_state == NET_CONNECTED || current_state == NET_IN_GAME) {
             if (memcmp(connected_peer_mac, msg->src_mac, 6) == 0) {
                 current_state = NET_IDLE;
                 esp_now_del_peer(connected_peer_mac);
-                remote_game_ended = true; // Force exit game
+                remote_game_ended = true; // 强制退出游戏
             }
         }
     }
-    // 5. Data (Test)
+    // 5. 数据消息（测试）
     else if (msg->type == MSG_DATA) {
         if (current_state == NET_CONNECTED) {
-            // Verify it is from connected peer
+            // 验证是否来自已连接设备
             if (memcmp(connected_peer_mac, msg->src_mac, 6) == 0) {
                 Serial.printf("Received DATA from Peer: %02X:%02X:%02X:%02X:%02X:%02X\n",
                     msg->src_mac[0], msg->src_mac[1], msg->src_mac[2], 
@@ -108,7 +110,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
             }
         }
     }
-    // 6. Game Start
+    // 6. 游戏开始
     else if (msg->type == MSG_START_GAME) {
         if (current_state == NET_CONNECTED || current_state == NET_IN_GAME) {
             if (memcmp(connected_peer_mac, msg->src_mac, 6) == 0) {
@@ -119,7 +121,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
             }
         }
     }
-    // 7. Game Data
+    // 7. 游戏数据
     else if (msg->type == MSG_GAME_DATA) {
         if (current_state == NET_IN_GAME) {
             if (memcmp(connected_peer_mac, msg->src_mac, 6) == 0) {
@@ -127,7 +129,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
             }
         }
     }
-    // 8. Game End
+    // 8. 游戏结束
     else if (msg->type == MSG_END_GAME) {
         if (current_state == NET_IN_GAME) {
             if (memcmp(connected_peer_mac, msg->src_mac, 6) == 0) {
@@ -139,8 +141,9 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     }
 }
 
+// 初始化网络管理器
 void Network_Manager::init() {
-    // Set mode to AP_STA to allow both Web Server (AP) and ESP-NOW
+    // 设置为AP_STA模式，允许同时运行Web服务器（AP）和ESP-NOW
     WiFi.mode(WIFI_AP_STA);
     
     WiFi.macAddress(my_mac);
@@ -154,14 +157,16 @@ void Network_Manager::init() {
     esp_now_register_recv_cb(OnDataRecv);
 }
 
+// 禁用网络管理器
 void Network_Manager::disable() {
     esp_now_deinit();
     WiFi.mode(WIFI_OFF);
 }
 
+// 启用网络管理器
 void Network_Manager::enable() {
     init();
-    // Re-enable AP (Logic duplicated from web_server.cpp)
+    // 重新启用AP（逻辑与web_server.cpp重复）
     uint8_t mac[6];
     WiFi.macAddress(mac);
     char ssid[32];
@@ -169,8 +174,9 @@ void Network_Manager::enable() {
     WiFi.softAP(ssid, "12345678");
 }
 
+// 更新网络管理器状态
 void Network_Manager::update() {
-    // Cleanup old peers
+    // 清理超时设备
     if (current_state == NET_DISCOVERING) {
         for (auto it = discovered_peers.begin(); it != discovered_peers.end(); ) {
             if (millis() - it->last_seen > PEER_TIMEOUT) {
@@ -180,7 +186,7 @@ void Network_Manager::update() {
             }
         }
         
-        // Broadcast Presence
+        // 广播存在
         if (millis() - last_broadcast_time > BROADCAST_INTERVAL) {
             last_broadcast_time = millis();
             
@@ -197,7 +203,7 @@ void Network_Manager::update() {
                 memcpy(peerInfo.peer_addr, broadcastAddress, 6);
                 peerInfo.channel = 0;  
                 peerInfo.encrypt = false;
-                peerInfo.ifidx = WIFI_IF_AP; // Broadcast on AP interface
+                peerInfo.ifidx = WIFI_IF_AP; // 在AP接口上广播
                 esp_now_add_peer(&peerInfo);
             }
             
@@ -205,7 +211,7 @@ void Network_Manager::update() {
         }
     }
     
-    // Connected Logic (Test Heartbeat)
+    // 连接逻辑（测试心跳）
     if (current_state == NET_CONNECTED) {
         static unsigned long last_data_time = 0;
         if (millis() - last_data_time > 1000) {
@@ -216,13 +222,14 @@ void Network_Manager::update() {
             memcpy(msg.src_mac, my_mac, 6);
             strncpy(msg.name, my_name, 16);
             
-            // Send to connected peer
+            // 发送到已连接设备
             esp_now_send(connected_peer_mac, (uint8_t *) &msg, sizeof(msg));
              Serial.println("Sent MSG_DATA (Heartbeat)");
         }
     }
 }
 
+// 开始游戏
 void Network_Manager::startGame(uint8_t gameId, uint32_t seed) {
     if (current_state != NET_CONNECTED && current_state != NET_IN_GAME) return;
     
@@ -237,6 +244,7 @@ void Network_Manager::startGame(uint8_t gameId, uint32_t seed) {
     current_state = NET_IN_GAME;
 }
 
+// 发送游戏数据
 void Network_Manager::sendGameData(const TankData& data) {
     if (current_state != NET_IN_GAME) return;
     
@@ -249,6 +257,7 @@ void Network_Manager::sendGameData(const TankData& data) {
     esp_now_send(connected_peer_mac, (uint8_t *) &msg, sizeof(msg));
 }
 
+// 结束游戏
 void Network_Manager::endGame(uint8_t reason) {
     if (current_state != NET_IN_GAME) return;
     
@@ -262,6 +271,7 @@ void Network_Manager::endGame(uint8_t reason) {
     current_state = NET_CONNECTED;
 }
 
+// 检查是否有游戏请求
 bool Network_Manager::hasGameRequest(uint8_t* gameIdOut, uint32_t* seedOut) {
     if (game_request_pending) {
         *gameIdOut = game_request_id;
@@ -271,15 +281,18 @@ bool Network_Manager::hasGameRequest(uint8_t* gameIdOut, uint32_t* seedOut) {
     return false;
 }
 
+// 清除游戏请求
 void Network_Manager::clearGameRequest() {
     game_request_pending = false;
 }
 
+// 获取远程游戏数据
 bool Network_Manager::getRemoteGameData(TankData* dataOut) {
     *dataOut = remote_tank_data;
     return true;
 }
 
+// 检查远程游戏是否结束
 bool Network_Manager::isRemoteGameEnded(uint8_t* reasonOut) {
     if(remote_game_ended) {
         *reasonOut = remote_game_end_reason;
@@ -288,22 +301,26 @@ bool Network_Manager::isRemoteGameEnded(uint8_t* reasonOut) {
     return false;
 }
 
+// 清除远程游戏结束标志
 void Network_Manager::clearRemoteGameEnded() {
     remote_game_ended = false;
 }
 
+// 开始设备发现
 void Network_Manager::startDiscovery() {
     if (current_state == NET_CONNECTED) return;
     current_state = NET_DISCOVERING;
     discovered_peers.clear();
 }
 
+// 停止设备发现
 void Network_Manager::stopDiscovery() {
     if (current_state == NET_DISCOVERING) {
         current_state = NET_IDLE;
     }
 }
 
+// 配对设备
 void Network_Manager::pair(const uint8_t* target_mac) {
     if (current_state == NET_CONNECTED) return;
     
@@ -315,7 +332,7 @@ void Network_Manager::pair(const uint8_t* target_mac) {
         memcpy(peerInfo.peer_addr, pending_peer_mac, 6);
         peerInfo.channel = 0;  
         peerInfo.encrypt = false;
-        peerInfo.ifidx = WIFI_IF_AP; // Use AP interface
+        peerInfo.ifidx = WIFI_IF_AP; // 使用AP接口
         esp_now_add_peer(&peerInfo);
     }
     
@@ -329,6 +346,7 @@ void Network_Manager::pair(const uint8_t* target_mac) {
     current_state = NET_PAIRING;
 }
 
+// 断开连接
 void Network_Manager::disconnect() {
     if (current_state == NET_CONNECTED) {
         NetMessage msg;
@@ -343,14 +361,17 @@ void Network_Manager::disconnect() {
     }
 }
 
+// 获取当前网络状态
 NetState Network_Manager::getState() {
     return current_state;
 }
 
+// 获取发现的设备数量
 int Network_Manager::getPeerCount() {
     return discovered_peers.size();
 }
 
+// 获取发现的设备列表
 const PeerInfo* Network_Manager::getPeers() {
     return discovered_peers.data();
 }

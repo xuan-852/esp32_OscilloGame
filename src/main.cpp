@@ -11,13 +11,14 @@
 DAC8554 dac(DAC_CS); 
 
 // --- 编码器逻辑 ---
-volatile int32_t encoderValue = 0;
+volatile int32_t encoderValue = 0;  // 编码器值，用于旋转编码器计数
 
 // Web 控制变量
-volatile int web_enc_delta = 0;
-volatile bool web_btn_pressed = false;
-volatile int web_game_dir = -1;
+volatile int web_enc_delta = 0;     // Web端编码器增量
+volatile bool web_btn_pressed = false; // Web端按钮按下状态
+volatile int web_game_dir = -1;     // Web端游戏方向
 
+// 编码器中断服务程序
 void IRAM_ATTR readEncoderISR() {
   static uint8_t old_AB = 3; // 假设起始状态为 11 (上拉)
   uint8_t enc_A = digitalRead(EN_A);
@@ -39,6 +40,7 @@ void IRAM_ATTR readEncoderISR() {
 }
 // ---------------------
 
+// 列出目录内容函数
 void listDir(fs::FS &fs, const char * dirname, uint8_t levels) {
     Serial.printf("Listing directory: %s\n", dirname);
 
@@ -70,6 +72,7 @@ void listDir(fs::FS &fs, const char * dirname, uint8_t levels) {
     }
 }
 
+// 系统初始化函数
 void setup() {
   // 初始化串口
   Serial.begin(115200);
@@ -171,6 +174,7 @@ DRAW_Terminal_Print("CHECKING RAM...");
     digitalWrite(2,HIGH);
 }
 
+// 主循环函数
 void loop() {
   // 主循环为空，UI 由 FreeRTOS 任务处理
   delay(100); 
@@ -181,4 +185,5 @@ void loop() {
     char buffer[100];
     snprintf(buffer, sizeof(buffer), "JOY1X:%d JOY1Y:%d JOY2X:%d JOY2Y:%d S1:%d S2:%d A:%d B:%d ENC:%d", analogRead(JOY1_X), analogRead(JOY1_Y), analogRead(JOY2_X), analogRead(JOY2_Y), digitalRead(JOY1_SW), digitalRead(JOY2_SW), digitalRead(JOY_A), digitalRead(JOY_B), encoderValue);
   Serial.println(buffer);
+  
 }

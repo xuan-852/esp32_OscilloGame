@@ -4,24 +4,24 @@
 #include "DACoutput.h"
 #include "vector_draw.h"
 
-// Access the dac object defined in main.cpp
+// 访问在main.cpp中定义的dac对象
 extern DAC8554 dac;
 
 hw_timer_t * timer = NULL;
 
-// Define constants from DAC8554.cpp since they are not in .h
+// 从DAC8554.cpp定义常量，因为它们不在.h文件中
 #define DAC8554_BUFFER_WRITE          0x00
 #define DAC8554_ALL_WRITE             0x20
 
-// Pre-calculated masks for fast GPIO
+// 预计算的快速GPIO掩码
 uint32_t csMask;
 uint32_t mosiMask;
 uint32_t sclkMask;
 uint32_t ldacMask;
 
-// Audio Globals - Double Buffering
-// Max samples per buffer: 64KB (Mono) = 32768 samples.
-// Let's allocate 32768 samples per buffer.
+// 音频全局变量 - 双缓冲
+// 每个缓冲区的最大样本数：64KB（单声道）= 32768个样本
+// 为每个缓冲区分配32768个样本
 #define MAX_SAMPLES_PER_BUF 32768
 
 volatile uint16_t *bufA_L = NULL;
@@ -33,18 +33,20 @@ volatile uint16_t *bufB_R = NULL;
 volatile uint16_t *bufB_X = NULL;
 volatile uint16_t *bufB_Y = NULL;
 
-volatile bool bufA_ready = false; // True if A has data to play
-volatile bool bufB_ready = false; // True if B has data to play
+volatile bool bufA_ready = false; // 如果A有数据要播放则为true
+volatile bool bufB_ready = false; // 如果B有数据要播放则为true
 volatile int bufA_count = 0;
 volatile int bufB_count = 0;
 
-volatile bool playing_A = true; // True if currently playing A, False if B
+volatile bool playing_A = true; // 当前正在播放A为true，播放B为false
 volatile int play_idx = 0;
 
-volatile int player_mode = 0; // 0: Vector, 1: Audio, 2: Video
+volatile int player_mode = 0; // 0: 矢量模式, 1: 音频模式, 2: 视频模式
 
+// 初始化音频缓冲区
 void Init_Audio_Buffers() {
     if(bufA_L == NULL) {
+        // 为双缓冲分配PSRAM内存
         bufA_L = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
         bufA_R = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
         bufA_X = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
@@ -56,62 +58,85 @@ void Init_Audio_Buffers() {
         bufB_Y = (volatile uint16_t*)ps_malloc(MAX_SAMPLES_PER_BUF * sizeof(uint16_t));
         
         if(!bufA_L || !bufA_R || !bufA_X || !bufA_Y) {
-            Serial.println("Failed to allocate PSRAM for Double Buffers!");
+            Serial.println("为双缓冲区分配PSRAM失败！");
         } else {
-            Serial.printf("Allocated Double Buffers in PSRAM: %d samples each\n", MAX_SAMPLES_PER_BUF);
+            Serial.printf("在PSRAM中分配双缓冲区：每个缓冲区%d个样本\n", MAX_SAMPLES_PER_BUF);
         }
     }
-    // Reset state
+    // 重置状态
     bufA_ready = false;
     bufB_ready = false;
     playing_A = true;
     play_idx = 0;
 }
 
-// --- Double Buffer Interface ---
+// --- 双缓冲接口 ---
+
+// 检查缓冲区A是否空闲
 bool Is_Buf_A_Free() { return !bufA_ready; }
+
+// 检查缓冲区B是否空闲
 bool Is_Buf_B_Free() { return !bufB_ready; }
+
+// 获取缓冲区A的左声道指针
 uint16_t* Get_Buf_A_L() { return (uint16_t*)bufA_L; }
+
+// 获取缓冲区A的右声道指针
 uint16_t* Get_Buf_A_R() { return (uint16_t*)bufA_R; }
+
+// 获取缓冲区A的X坐标指针
 uint16_t* Get_Buf_A_X() { return (uint16_t*)bufA_X; }
+
+// 获取缓冲区A的Y坐标指针
 uint16_t* Get_Buf_A_Y() { return (uint16_t*)bufA_Y; }
+
+// 获取缓冲区B的左声道指针
 uint16_t* Get_Buf_B_L() { return (uint16_t*)bufB_L; }
+
+// 获取缓冲区B的右声道指针
 uint16_t* Get_Buf_B_R() { return (uint16_t*)bufB_R; }
+
+// 获取缓冲区B的X坐标指针
 uint16_t* Get_Buf_B_X() { return (uint16_t*)bufB_X; }
+
+// 获取缓冲区B的Y坐标指针
 uint16_t* Get_Buf_B_Y() { return (uint16_t*)bufB_Y; }
 
+// 标记缓冲区A准备就绪
 void Mark_Buf_A_Ready(int count) {
     bufA_count = count;
     bufA_ready = true;
 }
 
+// 标记缓冲区B准备就绪
 void Mark_Buf_B_Ready(int count) {
     bufB_count = count;
     bufB_ready = true;
 }
 
+// 设置播放器模式
 void Set_Player_Mode(int mode) {
     player_mode = mode;
     if(mode > 0) {
         setDACFreq(44100);
-        // Reset playback state when entering audio/video mode
+        // 进入音频/视频模式时重置播放状态
         play_idx = 0;
         playing_A = true;
         bufA_ready = false;
         bufB_ready = false;
     } else {
-        setDACFreq(80000); // Restore vector freq
+        setDACFreq(80000); // 恢复矢量频率
     }
 }
 
-// 优化的 DAC8554 发送函数
-// 使用硬件 SPI 发送 24位数据
+// 优化的DAC8554发送函数
+// 使用硬件SPI发送24位数据
 void IRAM_ATTR sendDAC(uint8_t configRegister, uint16_t value) {
-  // CS LOW
+  // CS引脚置低
   GPIO.out_w1tc = csMask;
 
-  // 组合 24位 数据: 8位 Config + 16位 Value
-  // 使用 SPI.writeBytes 发送 buffer，这通常比单字节 transfer 更快且安全
+  // 组合24位数据：8位配置寄存器 + 16位数值
+  // 使用SPI.writeBytes发送缓冲区，通常比单字节传输更快且安全
   uint8_t data[3];
   data[0] = configRegister;
   data[1] = (value >> 8);
@@ -119,13 +144,14 @@ void IRAM_ATTR sendDAC(uint8_t configRegister, uint16_t value) {
   
   SPI.writeBytes(data, 3);
 
-  // CS HIGH
+  // CS引脚置高
   GPIO.out_w1ts = csMask;
 }
 
+// 定时器中断处理函数
 void IRAM_ATTR onTimer() {
   if (player_mode > 0) {
-      // Audio/Video Mode
+      // 音频/视频模式
       uint16_t l = 32768;
       uint16_t r = 32768;
       uint16_t x = 32768;
@@ -143,8 +169,8 @@ void IRAM_ATTR onTimer() {
               play_idx++;
               has_data = true;
               if (play_idx >= bufA_count) {
-                  bufA_ready = false; // Done with A
-                  playing_A = false;  // Switch to B
+                  bufA_ready = false; // A缓冲区播放完成
+                  playing_A = false;  // 切换到B缓冲区
                   play_idx = 0;
               }
           }
@@ -159,60 +185,62 @@ void IRAM_ATTR onTimer() {
               play_idx++;
               has_data = true;
               if (play_idx >= bufB_count) {
-                  bufB_ready = false; // Done with B
-                  playing_A = true;   // Switch to A
+                  bufB_ready = false; // B缓冲区播放完成
+                  playing_A = true;   // 切换到A缓冲区
                   play_idx = 0;
               }
           }
       }
 
       if (has_data) {
-          // Send Audio to Ch 2 and 3
+          // 发送音频到通道2和3
           sendDAC(DAC8554_BUFFER_WRITE | (2 << 1), l);
           sendDAC(DAC8554_BUFFER_WRITE | (3 << 1), r);
           
           if(player_mode == 2) {
-              // Send Video to Ch 0 and 1
+              // 发送视频到通道0和1
               sendDAC(DAC8554_BUFFER_WRITE | (0 << 1), x);
               sendDAC(DAC8554_BUFFER_WRITE | (1 << 1), y);
           }
           
-          // Update
+          // 更新DAC输出
           GPIO.out_w1tc = ldacMask; 
           GPIO.out_w1ts = ldacMask; 
       }
   } else {
+      // 矢量模式
       uint16_t outX, outY;
       
       // 获取当前需要绘制的坐标
       DRAW_GetNextPoint(outX, outY);
 
-      // 发送 X 到通道 0
+      // 发送X坐标到通道0
       sendDAC(DAC8554_BUFFER_WRITE | (0 << 1), outX);
 
-      // 发送 Y 到通道 1
+      // 发送Y坐标到通道1
       sendDAC(DAC8554_BUFFER_WRITE | (1 << 1), outY);
 
-      // 脉冲 LDAC 更新输出
-      GPIO.out_w1tc = ldacMask; // LOW
-      GPIO.out_w1ts = ldacMask; // HIGH
+      // 脉冲LDAC引脚更新输出
+      GPIO.out_w1tc = ldacMask; // 置低
+      GPIO.out_w1ts = ldacMask; // 置高
   }
 }
 
+// 初始化DAC输出系统
 void initDACoutput() {
-  // 初始化 DAC LDAC 引脚
+  // 初始化DAC LDAC引脚
   pinMode(DAC_LDAC, OUTPUT);
   digitalWrite(DAC_LDAC, HIGH); 
   
-  // 初始化 CS 引脚
+  // 初始化CS引脚
   pinMode(DAC_CS, OUTPUT);
   digitalWrite(DAC_CS, HIGH);
 
-  // 初始化 SPI
+  // 初始化SPI通信
   SPI.begin(DAC_SCLK, DAC_MISO, DAC_MOSI, DAC_CS);
   SPI.beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE1));
 
-  // 设置快速 GPIO 掩码
+  // 设置快速GPIO掩码
   csMask = (1 << DAC_CS);
   mosiMask = (1 << DAC_MOSI);
   sclkMask = (1 << DAC_SCLK);
@@ -221,30 +249,31 @@ void initDACoutput() {
   // 初始化绘图逻辑
   DRAW_Init();
   
-  // 初始化音频缓冲区 (PSRAM)
+  // 初始化音频缓冲区（PSRAM）
   Init_Audio_Buffers();
 
-  // 初始化定时器 0
-  // 使用 80 分频 -> 1MHz (1us)
-  // 这样兼容性更好，且对于音频 (22us) 精度足够
+  // 初始化定时器0
+  // 使用80分频 -> 1MHz（1微秒）
+  // 这样兼容性更好，且对于音频（22微秒）精度足够
   timer = timerBegin(0, 80, true);
 
-  // 绑定中断
+  // 绑定中断处理函数
   timerAttachInterrupt(timer, &onTimer, true);
 
-  // 设置默认频率 80kHz
+  // 设置默认频率80kHz
   setDACFreq(80000);
 
-  // 启用报警
+  // 启用定时器报警
   timerAlarmEnable(timer);
 }
 
+// 设置DAC输出频率
 void setDACFreq(uint32_t freq) {
   if (timer == NULL) return;
   if (freq == 0) freq = 1;
   
-  // Base clock is now 1MHz (1,000,000 Hz)
-  // ticks = 1,000,000 / freq
+  // 基础时钟现在是1MHz（1,000,000 Hz）
+  // 定时器计数 = 1,000,000 / 频率
   uint32_t ticks = 1000000 / freq;
   if (ticks < 2) ticks = 2; 
   
