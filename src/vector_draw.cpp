@@ -337,34 +337,16 @@ void DRAW_SetTextScroll(int16_t slot, int32_t scroll) {
 }
 
 void DRAW_Update(void) {
-    // 处理滚动
-    for (uint16_t i = 0; i < shapeCount; i++) {
-        Shape *s = &shapePool[i];
-        if (s->type == SHAPE_STRING) {
-            int32_t width = s->param1; // 获取缓存的宽度
-            // 检查文本是否超出右边缘 (2047)
-            // 如果 x + width > 2047，启用滚动
-            if (s->x + width > 2047) {
-                s->scroll += 10; // 滚动速度
-                
-                // 如果完全滚动到屏幕左侧之外
-                // render_x = x - scroll
-                // if render_x + width < 0 => x - scroll + width < 0
-                if (s->x - s->scroll + width < 0) {
-                    // 重置为从右边缘出现
-                    // render_x = 2047 => x - scroll = 2047 => scroll = x - 2047
-                    s->scroll = s->x - 2047;
-                }
-            }
-        }
-    }
+    // 不再自动滚动字符串。
+    // 如需跑马灯效果，请显式调用 DRAW_SetTextScroll()。
+    (void)shapePool; // 抑制未使用警告
 }
 
 void DRAW_Terminal_Init(uint16_t scale_pct, int32_t spacing) {
     DRAW_Clear();
     term_scale_pct = scale_pct;
     term_spacing = spacing;
-    term_cursor_y = 4096 - 200; // 从顶部开始
+    term_cursor_y = 1800; // 从可视区域顶部开始
 }
 
 void DRAW_Terminal_SetSpacing(int32_t spacing) {

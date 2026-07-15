@@ -3,3 +3,28 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# === 日志 ===
+logs/
+*.log
+
+# === 系统文件 ===
+Thumbs.db
+.DS_Store
+
+# === 临时工具 ===
+tools/
+
+# === 报告文档 ===
+*.docx
+
+# === 敏感配置 ===
+# ai_config.h 包含 WiFi 密码 / API Key，使用模板文件配置
+include/ai_config.h
+
+# === 子模块（单独管理） ===
+components/esp-sr/
+components/idf-extra-components/
+
+# === 凭据配置文件 ===
+include/ai_config.h
