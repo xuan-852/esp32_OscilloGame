@@ -5,6 +5,8 @@
 #include "FS.h"
 #include "SD_MMC.h"
 #include "web_server.h"
+#include "ai_chat.h"
+#include "voice_control.h"
 #include <Arduino.h>
 #include <stdio.h>
 #include <vector>
@@ -260,7 +262,8 @@ enum UI_State {
     UI_RACING,
     UI_RUNTINY,
     UI_TANK, // 新增坦克游戏
-    UI_ABOUT
+    UI_ABOUT,
+    UI_AI_CHAT
 };
 
 static const char* main_menu_items[] = {
@@ -269,7 +272,7 @@ static const char* main_menu_items[] = {
     "Games",
     "Online", 
     "Game Joy", // 新增项目
-    "Settings",
+    "AI Chat",  // 替换 Settings
     "About"
 };
 static const int main_menu_count = 7;
@@ -1262,6 +1265,11 @@ static void guiTask(void* pvParameters) {
                 } else if (menu_index == 4) {
                     ui_state = UI_GAME_JOY;
                     last_menu_index = -1;
+                    continue;
+                } else if (menu_index == 5) {
+                    ui_state = UI_AI_CHAT;
+                    last_menu_index = -1;
+                    AI_Chat_Start();
                     continue;
                 } else if (menu_index == 6) {
                     ui_state = UI_ABOUT;
@@ -2534,23 +2542,122 @@ static void guiTask(void* pvParameters) {
             
             updateWebUIStatus(status);
 
-        } else if (ui_state == UI_ABOUT) {
-             if (btn_pressed) {
+        } else if (ui_state == UI_AI_CHAT) {
+            // 按 ENTER 退出 AI Chat（仅空闲/完成/错误阶段允许退出）
+            // 录音/ASR/推理中忽略按钮，避免与 ai_chat_task 抢 EN_S 松手信号
+            if (btn_pressed && (ai_chat_phase == AI_PHASE_WAITING ||
+                                ai_chat_phase == AI_PHASE_DONE ||
+                                ai_chat_phase == AI_PHASE_REPLY ||
+                                ai_chat_phase == AI_PHASE_ERROR)) {
+                AI_Chat_Stop();
                 ui_state = UI_MENU_MAIN;
-                rebuild = true;
+                menu_index = 5; // 回到 "AI Chat" 选项
                 last_menu_index = -1;
+                rebuild = true;
                 continue;
             }
-            
-            if (rebuild || last_menu_index == -1) {
+
+            // 检查是否存在待执行的语音动作（来自 ai_chat_task）
+            if (voice_pending) {
+                VC_Action act = voice_action;
+                voice_pending = false;
+                voice_action = VC_NONE;
+                AI_Chat_Stop();
+                switch (act) {
+                    case VC_OPEN_MUSIC:
+                        ui_state = UI_MENU_MUSIC; menu_index = 0; Scan_Music_Files(); break;
+                    case VC_OPEN_VIDEO:
+                        ui_state = UI_MENU_VIDEO; menu_index = 0; Scan_Video_Files(); break;
+                    case VC_OPEN_GAMES:
+                        ui_state = UI_MENU_GAMES; menu_index = 0; break;
+                    case VC_OPEN_ONLINE:
+                        ui_state = UI_MENU_ONLINE; Network_Manager::startDiscovery(); menu_index = 0; break;
+                    case VC_OPEN_GAME_JOY:
+                        ui_state = UI_GAME_JOY; break;
+                    case VC_OPEN_AI_CHAT:
+                        break; // 已经在这里
+                    case VC_OPEN_ABOUT:
+                        ui_state = UI_ABOUT; break;
+                    case VC_START_SNAKE:
+                        ui_state = UI_SNAKE; Init_Snake_Game(); break;
+                    case VC_START_BREAKOUT:
+                        ui_state = UI_BREAKOUT; Init_Breakout_Game(); break;
+                    case VC_START_FLAPPY:
+                        ui_state = UI_FLAPPY; Init_Flappy_Game(); break;
+                    case VC_START_RACING:
+                        ui_state = UI_RACING; Init_Racing_Game(); break;
+                    case VC_START_RUNTINY:
+                        ui_state = UI_RUNTINY; Init_RunTiny_Game(); break;
+                    case VC_START_TANK:
+                        ui_state = UI_TANK; Init_Tank_Game(0, true); break;
+                    case VC_BACK:
+                    case VC_EXIT:
+                    default:
+                        ui_state = UI_MENU_MAIN; menu_index = 5; break;
+                }
+                last_menu_index = -1;
+                rebuild = true;
+                continue;
+            }
+
+            // 渲染 AI Chat 屏幕
+            if (rebuild || ai_chat_dirty || last_menu_index == -1) {
                 DRAW_Clear();
-                DRAW_AddRect(50, 50, 1948, 1948);
-                DRAW_AddString("ABOUT", 0, 780, 1800, 17, 17);
-                DRAW_AddString("ESP32 VECTOR", 0, 610, 1300, 30, 30);
-                DRAW_AddString("DISPLAY SYSTEM", 0, 540, 1050, 30, 30);
-                DRAW_AddString("V1.0", 0, 885, 800, 30, 30);
-                updateWebUIStatus("ABOUT\nESP32 VECTOR\nDISPLAY SYSTEM\nV1.0");
-                last_menu_index = 0; // 标记为已绘制
+                DRAW_AddRect(0, 0, 2047, 2047);
+
+                if (ai_chat_phase == AI_PHASE_WAITING) {
+                    // 等待录音 — 居中大字显示
+                    DRAW_AddString("AI CHAT", 0, 600, 1800, 30, 30);
+                    DRAW_AddString(ai_chat_display_text, 0, 100, 1200, 22, 22);
+                    DRAW_AddString("PRESS ENTER", 0, 300, 600, 20, 20);
+                } else if (ai_chat_phase == AI_PHASE_RECORDING) {
+                    DRAW_AddString(ai_chat_display_text, 0, 100, 1600, 25, 25);
+                    // 显示录音动画点
+                    static int dot_cnt = 0;
+                    dot_cnt = (dot_cnt + 1) % 40;
+                    char dots[8] = ".";
+                    for (int i = 0; i < (dot_cnt / 10) + 1 && i < 4; i++) dots[i] = '.';
+                    dots[(dot_cnt / 10) + 1] = '\0';
+                    DRAW_AddString(dots, 0, 1200, 1600, 25, 25);
+                } else if (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_DONE) {
+                    // 显示 AI 回复 — 大字静态段落，自动换行不滚动
+                    {
+                        String txt = ai_chat_display_text;
+                        int32_t y = 1700;
+                        int idx = 0;
+                        while (idx < (int)txt.length() && y > 400) {
+                            int end = idx + 18;
+                            if (end >= (int)txt.length()) end = txt.length();
+                            else {
+                                int sp = txt.lastIndexOf(' ', end);
+                                if (sp > idx) end = sp;
+                            }
+                            String line = txt.substring(idx, end);
+                            line.trim();
+                            if (line.length() > 0) {
+                                DRAW_AddString(line.c_str(), 0, 100, y, 22, 22);
+                                y -= 220;
+                            }
+                            idx = end;
+                            while (idx < (int)txt.length() && txt[idx] == ' ') idx++;
+                        }
+                    }
+                    DRAW_AddRect(0, 0, 2047, 2047);
+                    if (ai_chat_phase == AI_PHASE_DONE) {
+                        DRAW_AddString("--- PRESS ENTER TO EXIT ---", 0, 50, 250, 14, 14);
+                    }
+                } else if (ai_chat_phase == AI_PHASE_ERROR) {
+                    DRAW_AddString("ERROR", 0, 700, 1800, 20, 20);
+                    DRAW_AddString(ai_chat_display_text, 0, 200, 1200, 18, 18);
+                } else {
+                    // THINKING / CONNECTING / TOKEN / ASR
+                    DRAW_AddString("AI CHAT", 0, 600, 1800, 30, 30);
+                    DRAW_AddString(ai_chat_display_text, 0, 300, 1000, 22, 22);
+                }
+
+                ai_chat_dirty = false;
+                updateWebUIStatus(String("AI CHAT\n") + ai_chat_display_text);
+                last_menu_index = 0;
             }
         }
 

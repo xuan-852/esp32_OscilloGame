@@ -27,4 +27,7 @@
 #define EN_B 42
 #define EN_S 45
 
-
+// 麦克风 (INMP441 I2S)
+#define MIC_SCK  47
+#define MIC_WS   48
+#define MIC_DATA 1

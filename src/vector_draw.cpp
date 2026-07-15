@@ -364,7 +364,7 @@ void DRAW_Terminal_Init(uint16_t scale_pct, int32_t spacing) {
     DRAW_Clear();
     term_scale_pct = scale_pct;
     term_spacing = spacing;
-    term_cursor_y = 4096 - 200; // 从顶部开始
+    term_cursor_y = 1800; // 从可视区域顶部开始
 }
 
 void DRAW_Terminal_SetSpacing(int32_t spacing) {
