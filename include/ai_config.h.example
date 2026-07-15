@@ -1,0 +1,18 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// ==================== WiFi ====================
+// 替换为你的 WiFi 名称和密码
+#define WIFI_SSID      "your_wifi_ssid"
+#define WIFI_PASSWORD  "your_wifi_password"
+
+// ==================== 百度语音识别 ====================
+// 替换为你的百度 AI 应用凭据 (https://console.bce.baidu.com/ai/#/ai/speech/overview)
+#define BAIDU_API_KEY    "your_baidu_api_key"
+#define BAIDU_SECRET_KEY "your_baidu_secret_key"
+
+// ==================== DeepSeek ====================
+// 替换为你的 DeepSeek API Key (https://platform.deepseek.com/api_keys)
+#define DEEPSEEK_API_KEY "your_deepseek_api_key"
+
+#endif // CONFIG_H

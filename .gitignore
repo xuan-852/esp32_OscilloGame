@@ -18,6 +18,10 @@ tools/
 # === 报告文档 ===
 *.docx
 
+# === 敏感配置 ===
+# ai_config.h 包含 WiFi 密码 / API Key，使用模板文件配置
+include/ai_config.h
+
 # === 子模块（单独管理） ===
 components/esp-sr/
 components/idf-extra-components/
