@@ -93,7 +93,7 @@ void AI_Chat_Stop() {
 }
 
 // ---- 鍏变韩鍙橀噺 ----
-char  ai_chat_display_text[512];
+char  ai_chat_display_text[2048];
 volatile AIChatPhase ai_chat_phase = AI_PHASE_IDLE;
 volatile bool ai_chat_dirty = false;
 
@@ -277,7 +277,7 @@ static String deepseek_chat(const String& text) {
         JsonDocument req_doc;
         req_doc["model"] = "deepseek-v4-flash";
         req_doc["temperature"] = 0.7;
-        req_doc["max_tokens"] = 200;
+        req_doc["max_tokens"] = 500;
         req_doc["stream"] = false;
         req_doc["thinking"]["type"] = "disabled";
 
@@ -287,8 +287,8 @@ static String deepseek_chat(const String& text) {
         sys["content"] =
             "You control an oscilloscope game console. Reply STRICTLY in ENGLISH ONLY. "
             "ABSOLUTELY NEVER use Chinese or any non-ASCII characters. "
-            "Keep replies under 80 words, 5 lines max. "
-            "Pure ASCII text only, no accented letters, no Unicode.\n"
+            "You can write longer replies when needed, pure ASCII text only. "
+            "For short casual chat just respond naturally.\n"
             "CRITICAL: NEVER wrap your reply in quotes, backticks, code blocks, "
             "or any formatting markers. Return ONLY the raw sentence text.\n"
             "For navigation actions, reply with JSON (no markdown):\n"

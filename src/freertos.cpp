@@ -2547,7 +2547,7 @@ static void guiTask(void* pvParameters) {
             static unsigned long ai_chat_enter_ms = 0;
             static unsigned long ai_btn_down_ms = 0;   // 按钮按下时刻（用于长按检测）
             // 持久化分行缓冲区（30行×36字节，覆盖~540字符的回复）
-            static char ai_reply_lines[30][36];
+            static char ai_reply_lines[60][36];
             static int  ai_reply_line_count = 0;
             static int  ai_reply_scroll = 0;           // 当前滚动到第几行
             const int   AI_REPLY_MAX_VISIBLE = 6;       // 屏幕最多显示行数
@@ -2694,7 +2694,7 @@ static void guiTask(void* pvParameters) {
                         ai_reply_scroll = 0;
                         String txt = ai_chat_display_text;
                         int idx = 0;
-                        while (idx < (int)txt.length() && ai_reply_line_count < 30) {
+                        while (idx < (int)txt.length() && ai_reply_line_count < 60) {
                             int end = idx + 18;
                             if (end >= (int)txt.length()) end = txt.length();
                             else {

@@ -22,7 +22,7 @@ enum AIChatPhase {
     AI_PHASE_ERROR      = 9,
 };
 extern volatile AIChatPhase ai_chat_phase;
-extern char  ai_chat_display_text[512];
+extern char  ai_chat_display_text[2048];
 extern volatile bool ai_chat_dirty;
 
 #define AI_SCALE        30
