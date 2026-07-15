@@ -2545,44 +2545,88 @@ static void guiTask(void* pvParameters) {
         } else if (ui_state == UI_AI_CHAT) {
             // 进入 AI Chat 后的忽略按钮时间戳
             static unsigned long ai_chat_enter_ms = 0;
+            static unsigned long ai_btn_down_ms = 0;   // 按钮按下时刻（用于长按检测）
+            // 持久化分行缓冲区（30行×36字节，覆盖~540字符的回复）
+            static char ai_reply_lines[30][36];
+            static int  ai_reply_line_count = 0;
+            static int  ai_reply_scroll = 0;           // 当前滚动到第几行
+            const int   AI_REPLY_MAX_VISIBLE = 6;       // 屏幕最多显示行数
+            static bool ai_reply_dirty = true;          // 需要重新分行
+
             if (last_menu_index == -1) {
-                ai_chat_enter_ms = millis(); // 记录进入时间，用于防误触
+                ai_chat_enter_ms = millis();
+                ai_reply_dirty = true;
             }
 
-            // 编码器旋转 → 安全退出（任何阶段均可），进入后需等 500ms 防误触
+            // ---- 长按检测（按住时触发，不等释放）----
+            // 在 REPLY/DONE 阶段按住 500ms → 连续对话（直接开始录音）
+            static bool ai_long_press_triggered = false;
+            if (btn_state == LOW) {
+                unsigned long held_ms = millis() - ai_btn_down_ms;
+                bool is_reply_or_done = (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_DONE);
+                if (held_ms >= 500 && !ai_long_press_triggered && is_reply_or_done) {
+                    ai_long_press_triggered = true;
+                    Serial.println("[AICHAT] Hold 500ms, continuing conversation (record while held)...");
+                    ai_continue_mode = true;
+                    AI_Chat_Stop();
+                    for (int w = 0; w < 25 && ai_chat_active; w++) vTaskDelay(pdMS_TO_TICKS(20));
+                    ai_reply_dirty = true;
+                    ai_reply_line_count = 0;
+                    ai_reply_scroll = 0;
+                    last_menu_index = -1;
+                    rebuild = true;
+                    AI_Chat_Start();
+                    continue;
+                }
+            } else {
+                ai_long_press_triggered = false;
+            }
+            // 记录按钮按下时刻（下降沿）
+            if (btn_state == LOW && last_btn_state == HIGH) {
+                ai_btn_down_ms = millis();
+            }
+
+            // ---- 编码器：REPLY/DONE 阶段滚动文本，其余阶段退出 ----
             if (enc_delta != 0 && (millis() - ai_chat_enter_ms > 500) && ai_chat_phase != AI_PHASE_RECORDING) {
-                AI_Chat_Stop();
-                ui_state = UI_MENU_MAIN;
-                menu_index = 5;
-                last_menu_index = -1;
-                rebuild = true;
-                continue;
+                if (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_DONE) {
+                    // 滚动文本
+                    int max_scroll = max(0, ai_reply_line_count - AI_REPLY_MAX_VISIBLE);
+                    ai_reply_scroll = constrain(ai_reply_scroll - enc_delta, 0, max_scroll);
+                    last_menu_index = -1; // 强制重绘
+                } else {
+                    // 其他阶段 → 退出
+                    AI_Chat_Stop();
+                    ui_state = UI_MENU_MAIN;
+                    menu_index = 5;
+                    last_menu_index = -1;
+                    rebuild = true;
+                    continue;
+                }
             }
 
-            // 按 ENTER 退出 AI Chat（仅完成/回复/错误阶段允许退出）
-            // 录音/ASR/推理中忽略按钮，避免与 ai_chat_task 抢 EN_S 松手信号
-            // ★ 进入后 500ms 内忽略按钮（防止菜单选择松手产生的上升沿误触）
-            if (btn_pressed && (millis() - ai_chat_enter_ms > 500) && (ai_chat_phase == AI_PHASE_DONE ||
-                                ai_chat_phase == AI_PHASE_REPLY ||
-                                ai_chat_phase == AI_PHASE_ERROR)) {
-                AI_Chat_Stop();
-                ui_state = UI_MENU_MAIN;
-                menu_index = 5; // 回到 "AI Chat" 选项
-                last_menu_index = -1;
-                rebuild = true;
-                continue;
+            // ---- 短按（释放时触发）：退出到主菜单 ----
+            // btn_pressed 是上升沿（释放），仅当按下的持续时间 < 500ms 才视为短按
+            if (btn_pressed && (millis() - ai_chat_enter_ms > 500)) {
+                unsigned long hold_ms = millis() - ai_btn_down_ms;
+                if (hold_ms < 500) {
+                    bool is_reply_or_done = (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_DONE);
+                    if (is_reply_or_done || ai_chat_phase == AI_PHASE_ERROR) {
+                        AI_Chat_Stop();
+                        ui_state = UI_MENU_MAIN;
+                        menu_index = 5;
+                        last_menu_index = -1;
+                        rebuild = true;
+                        continue;
+                    }
+                }
             }
 
-            // 检查是否存在待执行的语音动作（来自 ai_chat_task）
+            // ---- 检查语音动作 ----
             if (voice_pending) {
                 VC_Action act = voice_action;
                 voice_pending = false;
                 voice_action = VC_NONE;
-                // 等待 ai_chat_task 自然退出（释放 MIC/PSRAM），最长等 500ms
-                for (int wait_i = 0; wait_i < 25 && ai_chat_active; wait_i++) {
-                    vTaskDelay(pdMS_TO_TICKS(20));
-                }
-                // 强制清理
+                for (int wait_i = 0; wait_i < 25 && ai_chat_active; wait_i++) vTaskDelay(pdMS_TO_TICKS(20));
                 AI_Chat_Stop();
                 switch (act) {
                     case VC_OPEN_MUSIC:
@@ -2596,7 +2640,7 @@ static void guiTask(void* pvParameters) {
                     case VC_OPEN_GAME_JOY:
                         ui_state = UI_GAME_JOY; break;
                     case VC_OPEN_AI_CHAT:
-                        break; // 已经在这里
+                        break;
                     case VC_OPEN_ABOUT:
                         ui_state = UI_ABOUT; break;
                     case VC_START_SNAKE:
@@ -2621,19 +2665,22 @@ static void guiTask(void* pvParameters) {
                 continue;
             }
 
-            // 渲染 AI Chat 屏幕
+            // ---- 新回复到达时重新分行 ----
+            if (ai_chat_dirty && (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_DONE)) {
+                ai_reply_dirty = true;
+            }
+
+            // ---- 渲染 AI Chat 屏幕 ----
             if (rebuild || ai_chat_dirty || last_menu_index == -1) {
                 DRAW_Clear();
                 DRAW_AddRect(0, 0, 2047, 2047);
 
                 if (ai_chat_phase == AI_PHASE_WAITING) {
-                    // 等待录音 — 居中大字显示
                     DRAW_AddString("AI CHAT", 0, 600, 1800, 30, 30);
                     DRAW_AddString(ai_chat_display_text, 0, 100, 1200, 22, 22);
                     DRAW_AddString("PRESS ENTER", 0, 300, 600, 20, 20);
                 } else if (ai_chat_phase == AI_PHASE_RECORDING) {
                     DRAW_AddString(ai_chat_display_text, 0, 100, 1600, 25, 25);
-                    // 显示录音动画点
                     static int dot_cnt = 0;
                     dot_cnt = (dot_cnt + 1) % 40;
                     char dots[8] = ".";
@@ -2641,12 +2688,13 @@ static void guiTask(void* pvParameters) {
                     dots[(dot_cnt / 10) + 1] = '\0';
                     DRAW_AddString(dots, 0, 1200, 1600, 25, 25);
                 } else if (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_DONE) {
-                    // 显示 AI 回复 — 大字静态段落，自动换行不滚动
-                    {
+                    // ---- 新回复时重新分行到持久缓冲区 ----
+                    if (ai_reply_dirty) {
+                        ai_reply_line_count = 0;
+                        ai_reply_scroll = 0;
                         String txt = ai_chat_display_text;
-                        int32_t y = 1700;
                         int idx = 0;
-                        while (idx < (int)txt.length() && y > 400) {
+                        while (idx < (int)txt.length() && ai_reply_line_count < 30) {
                             int end = idx + 18;
                             if (end >= (int)txt.length()) end = txt.length();
                             else {
@@ -2656,22 +2704,39 @@ static void guiTask(void* pvParameters) {
                             String line = txt.substring(idx, end);
                             line.trim();
                             if (line.length() > 0) {
-                                DRAW_AddString(line.c_str(), 0, 100, y, 22, 22);
-                                y -= 220;
+                                strncpy(ai_reply_lines[ai_reply_line_count], line.c_str(), 35);
+                                ai_reply_lines[ai_reply_line_count][35] = '\0';
+                                ai_reply_line_count++;
                             }
                             idx = end;
                             while (idx < (int)txt.length() && txt[idx] == ' ') idx++;
                         }
+                        ai_reply_dirty = false;
                     }
-                    DRAW_AddRect(0, 0, 2047, 2047);
-                    if (ai_chat_phase == AI_PHASE_DONE) {
-                        DRAW_AddString("--- PRESS ENTER TO EXIT ---", 0, 50, 250, 14, 14);
+
+                    // ---- 绘制可见行 ----
+                    int32_t y = 1700;
+                    int end_line = min(ai_reply_line_count, ai_reply_scroll + AI_REPLY_MAX_VISIBLE);
+                    for (int i = ai_reply_scroll; i < end_line; i++) {
+                        DRAW_AddString(ai_reply_lines[i], 0, 100, y, 22, 22);
+                        y -= 220;
                     }
+
+                    // ---- 滚动指示器 ----
+                    if (ai_reply_line_count > AI_REPLY_MAX_VISIBLE) {
+                        int total_pages = ai_reply_line_count - AI_REPLY_MAX_VISIBLE + 1;
+                        int cur_page = ai_reply_scroll + 1;
+                        char hint[16];
+                        snprintf(hint, sizeof(hint), "[%d/%d]", cur_page, total_pages);
+                        DRAW_AddString(hint, 0, 850, 250, 14, 14);
+                    }
+
+                    // ---- 底部提示 ----
+                    DRAW_AddString("TAP=Exit  HOLD=Record again", 0, 50, 100, 12, 12);
                 } else if (ai_chat_phase == AI_PHASE_ERROR) {
                     DRAW_AddString("ERROR", 0, 700, 1800, 20, 20);
                     DRAW_AddString(ai_chat_display_text, 0, 200, 1200, 18, 18);
                 } else {
-                    // THINKING / CONNECTING / TOKEN / ASR
                     DRAW_AddString("AI CHAT", 0, 600, 1800, 30, 30);
                     DRAW_AddString(ai_chat_display_text, 0, 300, 1000, 22, 22);
                 }
@@ -2680,6 +2745,31 @@ static void guiTask(void* pvParameters) {
                 updateWebUIStatus(String("AI CHAT\n") + ai_chat_display_text);
                 last_menu_index = 0;
             }
+
+        } else if (ui_state == UI_ABOUT) {
+            // ABOUT 页面 — 显示项目信息
+            if (last_menu_index == -1) {
+                DRAW_Clear();
+                DRAW_AddRect(0, 0, 2047, 2047);
+                DRAW_AddString("ABOUT", 0, 700, 1850, 28, 28);
+                DRAW_AddString("ESP32 OscilloGame", 0, 150, 1500, 18, 18);
+                DRAW_AddString("Vector Oscilloscope", 0, 150, 1300, 16, 16);
+                DRAW_AddString("Game Console", 0, 150, 1120, 16, 16);
+                DRAW_AddString("AI Chat + Voice Ctrl", 0, 150, 920, 16, 16);
+                DRAW_AddString("DeepSeek / Baidu ASR", 0, 150, 700, 16, 16);
+                DRAW_AddString("", 0, 150, 500, 16, 16);
+                DRAW_AddString("Press ENTER to go back", 0, 150, 250, 14, 14);
+                last_menu_index = 0;
+            }
+
+            // 按 ENTER 返回主菜单
+            if (btn_pressed) {
+                ui_state = UI_MENU_MAIN;
+                last_menu_index = -1;
+                rebuild = true;
+                continue;
+            }
+
         }
 
         // 更新动画并渲染

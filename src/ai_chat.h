@@ -35,5 +35,8 @@ extern volatile bool ai_chat_dirty;
 void AI_Chat_Start();
 void AI_Chat_Stop();
 
+// 连续对话模式：设为 true 后新任务跳过 WAITING 直接进录音
+extern volatile bool ai_continue_mode;
+
 #endif
 

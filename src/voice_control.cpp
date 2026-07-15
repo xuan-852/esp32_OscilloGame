@@ -24,7 +24,37 @@ String VC_ParseReply(const String& json_reply) {
 
     if (json_reply.length() == 0) return json_reply;
 
-    // 尝试寻找 JSON 对象
+    // ---- JSON 数组格式：["reply","...","action","..."] ----
+    int arr_start = json_reply.indexOf('[');
+    if (arr_start >= 0) {
+        String arr_part = json_reply.substring(arr_start);
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, arr_part);
+        if (!err && doc.is<JsonArray>()) {
+            JsonArray arr = doc.as<JsonArray>();
+            if (arr.size() >= 2) {
+                // 数组第 2 个元素是 reply 文本
+                String reply_text = arr[1].as<String>();
+
+                // 如果数组有 >=4 个元素，第 4 个是 action
+                if (arr.size() >= 4) {
+                    const char* action_str = arr[3];
+                    if (action_str && strlen(action_str) > 0) {
+                        for (int i = 0; i < action_count; i++) {
+                            if (strcmp(action_str, action_names[i]) == 0) {
+                                voice_action = (VC_Action)(i + 1);
+                                voice_pending = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                return reply_text;
+            }
+        }
+    }
+
+    // ---- JSON 对象格式：{"reply":"...","action":"..."} ----
     int brace_start = json_reply.indexOf('{');
     if (brace_start < 0) return json_reply; // 纯文本，无动作
 

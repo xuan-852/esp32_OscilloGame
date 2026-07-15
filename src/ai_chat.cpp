@@ -32,6 +32,7 @@
 #define CHUNK_SIZE       512
 
 volatile bool ai_chat_active = false;
+volatile bool ai_continue_mode = false;
 
 static Microphone* s_mic = nullptr;
 static char baidu_token[256] = {0};
@@ -73,6 +74,9 @@ void AI_Chat_Start() {
     voice_action = VC_NONE;
     // 清除残留 MIC 指针
     if (s_mic) { delete s_mic; s_mic = nullptr; }
+    // 防止 WiFi 省电中断 HTTPS（录音+ASR 耗时久，省电会断联）
+    WiFi.setSleep(false);
+    delay(500);  // 等待 WiFi 模组完全唤醒（否则第二次 HTTPS/SSL 握手会失败）
     // 重置阶段
     ai_chat_phase = AI_PHASE_IDLE;
 
@@ -216,10 +220,11 @@ static String baidu_asr(const int16_t* pcm, size_t samples) {
     unsigned long t_asr = millis();
     int code = http.POST((uint8_t*)pcm, pcm_bytes);
     Serial.printf("[AICHAT] ASR HTTP %d (%ums)\n", code, millis() - t_asr);
-    if (code != 200) { http.end(); return String(); }
+    if (code != 200) { http.end(); client.stop(); return String(); }
 
     String resp = http.getString();
     http.end();
+    client.stop();
     Serial.printf("[AICHAT] ASR response %u bytes\n", resp.length());
 
     JsonDocument doc;
@@ -239,125 +244,146 @@ static String baidu_asr(const int16_t* pcm, size_t samples) {
 
 // ---- DeepSeek 对话（HTTPClient，PSRAM 已启用所以 SSL 不报 -76）
 static String deepseek_chat(const String& text) {
-    // === 诊断：DNS 解析 ===
-    Serial.println("[DSEEK] Resolving api.deepseek.com...");
-    IPAddress ip;
-    if (!WiFi.hostByName("api.deepseek.com", ip)) {
-        Serial.println("[DSEEK] DNS RESOLVE FAILED!");
-    } else {
-        Serial.printf("[DSEEK] DNS OK: %s\n", ip.toString().c_str());
+    Serial.printf("[DSEEK] heap: %u  WiFi RSSI: %d\n", ESP.getFreeHeap(), WiFi.RSSI());
+
+    // 确保 WiFi 在线
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[DSEEK] WiFi lost, reconnecting...");
+        WiFi.reconnect();
+        int w = 0;
+        while (WiFi.status() != WL_CONNECTED && w < 40) { delay(250); w++; }
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[DSEEK] WiFi reconnect failed");
+            return String();
+        }
+        Serial.println("[DSEEK] WiFi reconnected");
     }
 
-    // === 诊断：TCP 连通性测试 ===
-    Serial.println("[DSEEK] Testing TCP to api.deepseek.com:443...");
-    WiFiClient tcp_test;
-    unsigned long t0 = millis();
-    bool tcp_ok = tcp_test.connect(ip, 443, 5000);
-    if (tcp_ok) {
-        Serial.printf("[DSEEK] TCP OK (%ums)\n", millis() - t0);
-        tcp_test.stop();
-    } else {
-        Serial.printf("[DSEEK] TCP FAILED (%ums)\n", millis() - t0);
+    String result;
+    for (int attempt = 0; attempt < 2 && result.length() == 0; attempt++) {
+        if (attempt > 0) { Serial.printf("[DSEEK] retry %d\n", attempt + 1); delay(500); }
+
+        WiFiClientSecure client;
+        client.setInsecure();
+
+        HTTPClient http;
+        http.begin(client, "https://api.deepseek.com/chat/completions");
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("Authorization", String("Bearer ") + DEEPSEEK_API_KEY);
+        http.useHTTP10(true);
+        http.setTimeout(30000);
+        http.setConnectTimeout(10000);
+
+        JsonDocument req_doc;
+        req_doc["model"] = "deepseek-v4-flash";
+        req_doc["temperature"] = 0.7;
+        req_doc["max_tokens"] = 200;
+        req_doc["stream"] = false;
+        req_doc["thinking"]["type"] = "disabled";
+
+        JsonArray messages = req_doc["messages"].to<JsonArray>();
+        JsonObject sys = messages.add<JsonObject>();
+        sys["role"] = "system";
+        sys["content"] =
+            "You control an oscilloscope game console. Reply STRICTLY in ENGLISH ONLY. "
+            "ABSOLUTELY NEVER use Chinese or any non-ASCII characters. "
+            "Keep replies under 80 words, 5 lines max. "
+            "Pure ASCII text only, no accented letters, no Unicode.\n"
+            "CRITICAL: NEVER wrap your reply in quotes, backticks, code blocks, "
+            "or any formatting markers. Return ONLY the raw sentence text.\n"
+            "For navigation actions, reply with JSON (no markdown):\n"
+            "{\"reply\":\"...\",\"action\":\"action_name\"}\n"
+            "Actions: open_music, open_video, open_games, open_online, "
+            "open_game_joy, open_ai_chat, open_about, "
+            "start_snake, start_breakout, start_flappy, start_racing, "
+            "start_runtiny, start_tank, back, exit";
+
+        JsonObject user = messages.add<JsonObject>();
+        user["role"] = "user";
+        user["content"] = text;
+
+        String body;
+        serializeJson(req_doc, body);
+        Serial.printf("[AICHAT] DeepSeek POST %u bytes...\n", body.length());
+
+        int code = http.POST(body);
+        Serial.printf("[AICHAT] DeepSeek HTTP %d\n", code);
+
+        String resp = http.getString();
+        http.end();
+        client.stop();
+
+        if (code != 200) {
+            Serial.printf("[AICHAT] DeepSeek HTTP %d, resp: %s\n", code, resp.substring(0, 200).c_str());
+            continue;
+        }
+        if (resp.length() == 0) { Serial.println("[AICHAT] DeepSeek empty response"); continue; }
+
+        // 打印原始响应
+        Serial.println("===== DEEPSEEK RAW RESPONSE (first 500 chars) =====");
+        Serial.println(resp.substring(0, 500));
+        Serial.println("===== END RAW RESPONSE =====");
+
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, resp);
+        if (err) { Serial.printf("[AICHAT] DeepSeek JSON parse fail: %s\n", err.c_str()); continue; }
+
+        const char* content = doc["choices"][0]["message"]["content"];
+        if (!content) { Serial.println("[AICHAT] DeepSeek no content"); continue; }
+
+        result = String(content);
+        result.trim();
+        Serial.printf("[DEEPSEEK] Parsed content (%u chars):\n%s\n--- end ---\n", result.length(), result.c_str());
+
+        // 过滤所有非 ASCII 字符（矢量字库只支持 ASCII）
+        String filtered;
+        for (size_t i = 0; i < result.length(); i++) {
+            char c = result[i];
+            if (c >= 32 && c <= 126) filtered += c;
+            else if (c == '\n' || c == '\r') filtered += c;
+            else filtered += ' ';
+        }
+        filtered.trim();
+
+        // 迭代剥离各种包裹符号，直到无法再剥离
+        while (true) {
+            int old_len = filtered.length();
+            while ((filtered.startsWith("```") || filtered.startsWith("'''")) &&
+                   (filtered.endsWith("```") || filtered.endsWith("'''"))) {
+                filtered = filtered.substring(3, filtered.length() - 3);
+                filtered.trim();
+            }
+            if (filtered.startsWith("`") && filtered.endsWith("`") && filtered.indexOf('\n') < 0) {
+                filtered = filtered.substring(1, filtered.length() - 1);
+                filtered.trim();
+            }
+            if (filtered.length() >= 2 && filtered[0] == '[' && filtered[filtered.length() - 1] == ']') {
+                String inner = filtered.substring(1, filtered.length() - 1);
+                inner.trim();
+                if (inner.startsWith("```") || inner.startsWith("'''") ||
+                    inner.startsWith("'") || inner.startsWith("`")) {
+                    filtered = inner;
+                }
+            }
+            while (filtered.length() >= 2) {
+                char f = filtered[0];
+                char e = filtered[filtered.length() - 1];
+                if ((f == '\'' && e == '\'') || (f == '"' && e == '"')) {
+                    filtered = filtered.substring(1, filtered.length() - 1);
+                    filtered.trim();
+                } else { break; }
+            }
+            if (filtered.length() == old_len) break;
+        }
+
+        Serial.printf("[AICHAT] DeepSeek reply OK, %u chars (filtered from %u)\n", filtered.length(), result.length());
+        Serial.printf("[DEEPSEEK] Filtered text: \"%s\"\n", filtered.c_str());
+        return filtered;
     }
 
-    WiFiClientSecure client;
-    client.setInsecure();
-
-    HTTPClient http;
-    http.begin(client, "https://api.deepseek.com/chat/completions");
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Authorization", String("Bearer ") + DEEPSEEK_API_KEY);
-    http.useHTTP10(true);
-    http.setTimeout(30000);
-    http.setConnectTimeout(10000);
-
-    JsonDocument req_doc;
-    req_doc["model"] = "deepseek-v4-flash";
-    req_doc["temperature"] = 0.7;
-    req_doc["max_tokens"] = 200;
-    req_doc["stream"] = false;
-    req_doc["thinking"]["type"] = "disabled";
-
-    JsonArray messages = req_doc["messages"].to<JsonArray>();
-    JsonObject sys = messages.add<JsonObject>();
-    sys["role"] = "system";
-    sys["content"] =
-        "You control an oscilloscope game console. Reply STRICTLY in ENGLISH ONLY. "
-        "ABSOLUTELY NEVER use Chinese or any non-ASCII characters. "
-        "Keep replies under 80 words, 5 lines max. "
-        "Pure ASCII text only, no accented letters, no Unicode.\n"
-        "For navigation actions, reply with JSON (no markdown):\n"
-        "{\"reply\":\"...\",\"action\":\"action_name\"}\n"
-        "Actions: open_music, open_video, open_games, open_online, "
-        "open_game_joy, open_ai_chat, open_about, "
-        "start_snake, start_breakout, start_flappy, start_racing, "
-        "start_runtiny, start_tank, back, exit";
-
-    JsonObject user = messages.add<JsonObject>();
-    user["role"] = "user";
-    user["content"] = text;
-
-    String body;
-    serializeJson(req_doc, body);
-
-    Serial.printf("[AICHAT] DeepSeek POST %u bytes...\n", body.length());
-
-    int code = http.POST(body);
-    Serial.printf("[AICHAT] DeepSeek HTTP %d\n", code);
-
-    String resp = http.getString();
-    http.end();
-
-    if (code != 200) {
-        Serial.printf("[AICHAT] DeepSeek HTTP %d, resp: %s\n", code, resp.substring(0, 300).c_str());
-        return String();
-    }
-
-    if (resp.length() == 0) {
-        Serial.println("[AICHAT] DeepSeek empty response");
-        return String();
-    }
-
-    // ★ 打印原始 HTTP 响应前 500 字符
-    Serial.println("===== DEEPSEEK RAW RESPONSE (first 500 chars) =====");
-    Serial.println(resp.substring(0, 500));
-    Serial.println("===== END RAW RESPONSE =====");
-
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, resp);
-    if (err) {
-        Serial.printf("[AICHAT] DeepSeek JSON parse fail: %s\n", err.c_str());
-        return String();
-    }
-
-    const char* content = doc["choices"][0]["message"]["content"];
-    if (!content) {
-        Serial.println("[AICHAT] DeepSeek no content in response");
-        return String();
-    }
-
-    String result(content);
-    result.trim();
-
-    // ★ 打印解析后的 content
-    Serial.printf("[DEEPSEEK] Parsed content (%u chars):\n", result.length());
-    Serial.println(result);
-    Serial.println("[DEEPSEEK] --- end content ---");
-
-    // 过滤所有非 ASCII 字符（矢量字库只支持 ASCII）
-    String filtered;
-    for (size_t i = 0; i < result.length(); i++) {
-        char c = result[i];
-        if (c >= 32 && c <= 126) filtered += c;
-        else if (c == '\n' || c == '\r') filtered += c;
-        else filtered += ' ';  // 替代不可见字符
-    }
-    filtered.trim();
-
-    Serial.printf("[AICHAT] DeepSeek reply OK, %u chars (filtered from %u)\n", filtered.length(), result.length());
-    // ★ 打印过滤后的文本
-    Serial.printf("[DEEPSEEK] Filtered text: \"%s\"\n", filtered.c_str());
-    return filtered;
+    // 所有重试都失败
+    Serial.printf("[DSEEK] all attempts failed, heap: %u\n", ESP.getFreeHeap());
+    return String();
 }
 
 
@@ -425,19 +451,28 @@ static void ai_chat_task(void* pvParameters) {
     }
     Serial.printf("[AICHAT] PSRAM buffer: %u bytes\n", alloc_bytes);
 
-    // ---- 等待 ENTER 按下录音 ----
-    ai_show(AI_PHASE_WAITING, "");
-    Serial.println("[AICHAT] WAITING for ENTER press...");
-    while (digitalRead(EN_S) == HIGH) {
-        if (!ai_chat_active) { Serial.println("[AICHAT] cancelled while waiting ENTER"); goto done; }
-        vTaskDelay(pdMS_TO_TICKS(20));
+    // ---- 等待 ENTER 按下录音（或连续对话模式直接进录音）----
+    if (ai_continue_mode) {
+        ai_continue_mode = false;
+        // 按钮仍处于按住状态（长按触发后还没松手）
+        Serial.println("[AICHAT] continue mode, recording while held...");
+        ai_show(AI_PHASE_RECORDING, "Recording... release to stop");
+        vTaskDelay(pdMS_TO_TICKS(50));
+        Serial.println("[AICHAT] start recording (continue)");
+    } else {
+        ai_show(AI_PHASE_WAITING, "");
+        Serial.println("[AICHAT] WAITING for ENTER press...");
+        while (digitalRead(EN_S) == HIGH) {
+            if (!ai_chat_active) { Serial.println("[AICHAT] cancelled while waiting ENTER"); goto done; }
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        Serial.println("[AICHAT] ENTER pressed");
+        // 立即切换阶段，防止 guiTask 上升沿退出
+        ai_show(AI_PHASE_RECORDING, "Recording... release to stop");
+        // 等待释放开始录音（防抖动）
+        vTaskDelay(pdMS_TO_TICKS(50));
+        Serial.println("[AICHAT] start recording");
     }
-    Serial.println("[AICHAT] ENTER pressed");
-    // 立即切换阶段，防止 guiTask 上升沿退出
-    ai_show(AI_PHASE_RECORDING, "Recording... release to stop");
-    // 等待释放开始录音（防抖动）
-    vTaskDelay(pdMS_TO_TICKS(50));
-    Serial.println("[AICHAT] start recording");
 
     // ---- 录音到 PSRAM ----
     ai_show(AI_PHASE_RECORDING, "Recording...");
@@ -488,13 +523,14 @@ static void ai_chat_task(void* pvParameters) {
     ai_show(AI_PHASE_THINKING, "Contacting AI...");
 
     {
-        const int max_attempts = 2; // flash 妯″瀷蹇紝鍑忓皯閲嶈瘯娆℃暟
+        const int max_attempts = 2;
         int attempt = 0;
         while (attempt < max_attempts) {
             if (attempt > 0) {
                 Serial.printf("[AICHAT] DeepSeek retry %d/%d\n", attempt + 1, max_attempts);
+                Serial.printf("[AICHAT] heap before retry: %u\n", ESP.getFreeHeap());
                 if (!wifi_ensure()) { reply = ""; break; }
-                vTaskDelay(pdMS_TO_TICKS(500));
+                vTaskDelay(pdMS_TO_TICKS(1500));  // 给 SSL 内存回收足够时间
             }
             reply = deepseek_chat(recognized);
             if (reply.length() > 0) break;
@@ -504,6 +540,7 @@ static void ai_chat_task(void* pvParameters) {
 
     if (reply.length() == 0) {
         Serial.println("[AICHAT] DeepSeek FAILED (empty reply)");
+        Serial.printf("[AICHAT] heap after DeepSeek fail: %u\n", ESP.getFreeHeap());
         ai_show(AI_PHASE_ERROR, "AI response failed");
         voice_action = VC_NONE;
         has_action = false;
@@ -520,11 +557,7 @@ static void ai_chat_task(void* pvParameters) {
         Serial.printf("[AICHAT] VC_ParseReply returned display=\"%s\" (%u chars)\n", display.c_str(), display.length());
         Serial.printf("[AICHAT] has_action=%d voice_action=%d\n", has_action, (int)voice_action);
 
-        if (has_action && display.length() > 0) {
-            ai_show(AI_PHASE_REPLY, display.c_str());
-        } else {
-            ai_show(AI_PHASE_REPLY, reply.c_str());
-        }
+        ai_show(AI_PHASE_REPLY, display.c_str());
     }
 
     Serial.println("\n" + String(50, '-'));
@@ -550,8 +583,12 @@ done:
     ai_chat_dirty = true;
     if (s_mic) { delete s_mic; s_mic = nullptr; }
     if (pcm_buffer) { free(pcm_buffer); Serial.println("[AICHAT] pcm_buffer freed"); }
+    // 注意：故意不恢复 WiFi 省电模式
+    // 如果这里调用 WiFi.setSleep(true)，下次 AI Chat 时 WiFi 模组仍未完全就绪，
+    // 会导致第二次 DeepSeek HTTPS/SSL 握手持续失败
     ai_chat_active = false;
     s_aiChatTaskHandle = NULL;
+    Serial.printf("[AICHAT] heap at exit: %u\n", ESP.getFreeHeap());
     Serial.println("[AICHAT] task exits, vTaskDelete");
     vTaskDelete(NULL);
 }
