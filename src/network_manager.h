@@ -25,6 +25,23 @@ struct TankData {
     } bullets[5];
 };
 
+// --- ESP-NOW 无线手柄数据 ---
+extern const uint8_t GAMEPAD_SLAVE_MAC[6];
+#define GAMEPAD_TIMEOUT_MS 500  // 手柄超时判定 (ms)
+
+typedef struct __attribute__((packed)) {
+    uint16_t joy1X;     // 左摇杆 X (0-4095)
+    uint16_t joy1Y;     // 左摇杆 Y
+    uint16_t joy2X;     // 右摇杆 X
+    uint16_t joy2Y;     // 右摇杆 Y
+    uint8_t  btnA;      // 按钮 A (0/1)
+    uint8_t  btnB;      // 按钮 B (0/1)
+    uint8_t  btn1SW;    // 摇杆1 按下
+    uint8_t  btn2SW;    // 摇杆2 按下
+    int16_t  encDelta;  // 编码器增量 (可选)
+    uint8_t  dirPad;    // 方向键: 0=上 1=下 2=左 3=右 255=无
+} GamepadData;
+
 // Fixed size packet for simplicity
 typedef struct {
     uint8_t type;
@@ -79,6 +96,10 @@ public:
     static bool getRemoteGameData(TankData* dataOut);
     static bool isRemoteGameEnded(uint8_t* reasonOut);
     static void clearRemoteGameEnded();
+
+    // --- 无线手柄 API ---
+    static bool isGamepadConnected();           // 手柄是否在线
+    static bool getGamepadData(GamepadData* out); // 获取最新手柄数据
 
     static NetState getState();
     static int getPeerCount();

@@ -186,6 +186,7 @@ static Tank my_tank;
 static Bullet tank_bullets[TANK_MAX_BULLETS];
 static int tank_game_over = 0;
 static unsigned long last_fire_time = 0;
+static bool tank_is_multiplayer = false;  // 是否为多人对战模式
 
 // 触摸引脚
 #define TOUCH_UP    4
@@ -773,12 +774,26 @@ void Generate_Random_Map(uint32_t seed) {
 }
 
 void Init_Tank_Game(uint32_t seed, bool is_initiator) {
-    // 检查连接
-    if(Network_Manager::getState() != NET_CONNECTED && Network_Manager::getState() != NET_IN_GAME) {
-        tank_game_over = 2; // 未连接
+    bool p2p_connected = (Network_Manager::getState() == NET_CONNECTED || 
+                          Network_Manager::getState() == NET_IN_GAME);
+    tank_is_multiplayer = p2p_connected;
+    
+    if (!p2p_connected) {
+        // 单人模式 — 不需要 P2P 连接，直接初始化
+        if (seed == 0) seed = millis();
+        Generate_Random_Map(seed);
+        my_tank.x = 1024;
+        my_tank.y = 1024;
+        my_tank.angle = -1.5707f;
+        for (int i = 0; i < TANK_MAX_BULLETS; i++) {
+            tank_bullets[i].active = false;
+        }
+        tank_game_over = 0;
+        Network_Manager::clearRemoteGameEnded();
         return;
     }
 
+    // 多人模式 — 需要 P2P 连接
     // 如果我们是发起者 (尚未在游戏中), 发送开始游戏
     if(is_initiator) {
         if(seed == 0) seed = millis();
@@ -823,38 +838,47 @@ void Init_Tank_Game(uint32_t seed, bool is_initiator) {
 void Update_Tank_Game(void) {
     if(tank_game_over) return;
 
-    // 检查远程退出
-    uint8_t reason;
-    if(Network_Manager::isRemoteGameEnded(&reason)) {
-        if(reason == 1) {
-             tank_game_over = 4; // 你赢了 (对手死亡)
-        } else {
-             tank_game_over = 3; // 对手离开
+    // 检查远程退出 (仅多人模式)
+    if (tank_is_multiplayer) {
+        uint8_t reason;
+        if(Network_Manager::isRemoteGameEnded(&reason)) {
+            if(reason == 1) {
+                 tank_game_over = 4; // 你赢了 (对手死亡)
+            } else {
+                 tank_game_over = 3; // 对手离开
+            }
+            return;
         }
-        return;
     }
 
     // 输入
-    // 左摇杆 Y (JOY1_Y) - 前进/后退
-    // 右摇杆 X (JOY2_X) - 旋转
-    // 按钮 A (JOY_A) - 开火
+    // 左摇杆 → 旋转 (物理Y轴=左右, 左=逆时针, 右=顺时针)
+    // 右摇杆 → 前进后退 (物理X轴=上下, 上=前进, 下=后退)
+    // 按钮 B → 开火
     
-    int joy1_y = analogRead(JOY1_Y); // 0-4095
-    int joy2_x = analogRead(JOY2_X); // 0-4095
-    int btn_a = !digitalRead(JOY_A);  // 松开 = 1 (HIGH), 按下 = 0 (LOW)
+    int rot_axis  = analogRead(JOY1_Y);  // 左摇杆 Y (物理左右)
+    int fwd_axis  = analogRead(JOY2_X);  // 右摇杆 X (物理上下)
+    int btn_fire  = !digitalRead(JOY_A);
+    
+    // --- 无线手柄覆盖 ---
+    GamepadData gp;
+    if (Network_Manager::getGamepadData(&gp)) {
+        rot_axis = gp.joy1Y;   // 物理Y=左右 → 旋转
+        fwd_axis = gp.joy2X;   // 物理X=上下 → 前进后退
+        btn_fire = gp.btnB;
+    }
     
     // 死区和映射
     float speed = 0;
-    if(abs(joy1_y - 2048) > 300) {
-        // 假设向上 (低值) -> 前进
-        // 2048 - val: 如果 val < 2048 (向上) 则为正
-        speed = (2048 - joy1_y) / 2048.0f * TANK_SPEED;
+    if(abs(fwd_axis - 2048) > 300) {
+        // 推上(低值)→前进, 推下(高值)→后退
+        speed = (2048 - fwd_axis) / 2048.0f * TANK_SPEED;
     }
     
     float turn = 0;
-    if(abs(joy2_x - 2048) > 300) {
-        // 假设向右 (高值) -> 顺时针
-        turn = (joy2_x - 2048) / 2048.0f * TANK_TURN_SPEED;
+    if(abs(rot_axis - 2048) > 300) {
+        // 推左(低值)→逆时针, 推右(高值)→顺时针
+        turn = (rot_axis - 2048) / 2048.0f * TANK_TURN_SPEED;
     }
     
     // 更新坦克
@@ -870,8 +894,20 @@ void Update_Tank_Game(void) {
     
     static int bullet_frames[TANK_MAX_BULLETS];
 
-    // 开火 (按下 = LOW)
-    if(btn_a == LOW && millis() - last_fire_time > 250) { 
+    // 开火 — 边缘触发 (松开→按下瞬间), B键
+    // 手柄重连时跳过首帧防止误触
+    static int  last_btn_fire   = 1;
+    static bool was_gp_connected = false;
+    bool gp_now = Network_Manager::isGamepadConnected();
+    if (gp_now && !was_gp_connected) {
+        last_btn_fire = btn_fire;  // 重连首帧同步状态, 不触发
+    }
+    was_gp_connected = gp_now;
+    
+    bool fire_triggered = (btn_fire == LOW && last_btn_fire == HIGH);
+    last_btn_fire = btn_fire;
+    
+    if(fire_triggered && millis() - last_fire_time > 250) { 
         last_fire_time = millis();
         for(int i=0; i<TANK_MAX_BULLETS; i++) {
             if(!tank_bullets[i].active) {
@@ -915,39 +951,44 @@ void Update_Tank_Game(void) {
         }
     }
     
-    // 检查远程子弹击中我
-    TankData remoteData;
-    if(Network_Manager::getRemoteGameData(&remoteData)) {
-        for(int i=0; i<remoteData.bullet_count; i++) {
-             float dx = remoteData.bullets[i].x - my_tank.x;
-             float dy = remoteData.bullets[i].y - my_tank.y;
-             if(dx*dx + dy*dy < 60*60) { // 坦克半径约 60 (从 30 增加)
-                 tank_game_over = 1; // 我死了
-             }
+    // 检查远程子弹击中我 (仅多人模式)
+    if (tank_is_multiplayer) {
+        TankData remoteData;
+        if(Network_Manager::getRemoteGameData(&remoteData)) {
+            for(int i=0; i<remoteData.bullet_count; i++) {
+                 float dx = remoteData.bullets[i].x - my_tank.x;
+                 float dy = remoteData.bullets[i].y - my_tank.y;
+                 if(dx*dx + dy*dy < 60*60) {
+                     tank_game_over = 1;
+                 }
+            }
         }
     }
     
     if(tank_game_over == 1) {
-        Network_Manager::endGame(1); // 通知对等方我输了 (原因 1 = 死亡)
-    }
-
-    // 网络同步 (约 100Hz, 每帧调用一次, 主循环为 25Hz, 但我们想要更快?)
-    // 主循环延迟为 40ms (25Hz). 我们应该每帧发送.
-    TankData data;
-    data.x = my_tank.x;
-    data.y = my_tank.y;
-    data.angle = my_tank.angle;
-    data.bullet_count = 0;
-    for(int i=0; i<TANK_MAX_BULLETS; i++) {
-        if(tank_bullets[i].active) {
-            if(data.bullet_count < 5) {
-                data.bullets[data.bullet_count].x = tank_bullets[i].x;
-                data.bullets[data.bullet_count].y = tank_bullets[i].y;
-                data.bullet_count++;
-            }
+        if (tank_is_multiplayer) {
+            Network_Manager::endGame(1);
         }
     }
-    Network_Manager::sendGameData(data);
+
+    // 网络同步 (仅多人模式)
+    if (tank_is_multiplayer) {
+        TankData data;
+        data.x = my_tank.x;
+        data.y = my_tank.y;
+        data.angle = my_tank.angle;
+        data.bullet_count = 0;
+        for(int i=0; i<TANK_MAX_BULLETS; i++) {
+            if(tank_bullets[i].active) {
+                if(data.bullet_count < 5) {
+                    data.bullets[data.bullet_count].x = tank_bullets[i].x;
+                    data.bullets[data.bullet_count].y = tank_bullets[i].y;
+                    data.bullet_count++;
+                }
+            }
+        }
+        Network_Manager::sendGameData(data);
+    }
 }
 
 // --- 音乐逻辑 ---
@@ -1181,18 +1222,45 @@ static void guiTask(void* pvParameters) {
             web_enc_delta = 0;
         }
         
+        // --- 无线手柄输入注入 ---
+        GamepadData gp;
+        bool gp_available = Network_Manager::getGamepadData(&gp);
+        static int16_t gp_last_enc = 0;
+        if (gp_available) {
+            // 手柄编码器增量
+            int16_t gp_enc = gp.encDelta;
+            if (gp_enc != 0) {
+                enc_delta += gp_enc;
+            }
+            // 方向键 → 游戏方向
+            if (gp.dirPad != 255) {
+                web_game_dir = gp.dirPad;
+            }
+        }
+        
         int btn_state = digitalRead(EN_S);
         bool btn_pressed = false;
+        bool btn_pressed_from_gp = false;      // 手柄触发
+        bool btn_pressed_from_hw = false;      // 硬件触发
         
         // 在释放时触发 (上升沿) 以防止保持问题
         if (btn_state == HIGH && last_btn_state == LOW && (millis() - last_btn_time > 50)) {
-            btn_pressed = true;
+            btn_pressed_from_hw = true;
         }
         
         if (web_btn_pressed) {
-            btn_pressed = true;
+            btn_pressed_from_hw = true;
             web_btn_pressed = false;
         }
+        
+        // 手柄 A 按钮 = 确定 (上升沿)
+        static bool gp_last_btnA = false;
+        if (gp_available && gp.btnA && !gp_last_btnA) {
+            btn_pressed_from_gp = true;
+        }
+        gp_last_btnA = (gp_available && gp.btnA);
+        
+        btn_pressed = btn_pressed_from_hw || btn_pressed_from_gp;
 
         // 记录按钮变低的时间
         if (btn_state == LOW && last_btn_state == HIGH) {
@@ -1308,6 +1376,16 @@ static void guiTask(void* pvParameters) {
                         DRAW_AddString(main_menu_items[item_idx], 0, 250, y, scale, scale);
                     }
                 }
+                
+                // 手柄连接状态指示 (屏幕底部)
+                if (Network_Manager::isGamepadConnected()) {
+                    DRAW_AddString("GPAD: OK", 0, 50, 100, 14, 14);
+                    status += "GPAD: OK\n";
+                } else {
+                    DRAW_AddString("GPAD: --", 0, 50, 100, 14, 14);
+                    status += "GPAD: --\n";
+                }
+                
                 updateWebUIStatus(status);
                 last_menu_index = menu_index;
             }
@@ -2468,38 +2546,40 @@ static void guiTask(void* pvParameters) {
                 }
             }
 
-            // 绘制远程坦克
-            TankData remoteData;
-            if(Network_Manager::getRemoteGameData(&remoteData)) {
-                float r_cos = cos(remoteData.angle);
-                float r_sin = sin(remoteData.angle);
-                
-                // 远程坦克车身
-                auto rRotX = [&](float x, float y) { return remoteData.x + x*r_cos - y*r_sin; };
-                auto rRotY = [&](float x, float y) { return remoteData.y + x*r_sin + y*r_cos; };
-                
-                float rx1 = rRotX(x1, y1), ry1 = rRotY(x1, y1);
-                float rx2 = rRotX(x2, y2), ry2 = rRotY(x2, y2);
-                float rx3 = rRotX(x3, y3), ry3 = rRotY(x3, y3);
-                float rx4 = rRotX(x4, y4), ry4 = rRotY(x4, y4);
-                
-                DRAW_AddLine(rx1, ry1, rx2, ry2);
-                DRAW_AddLine(rx2, ry2, rx3, ry3);
-                DRAW_AddLine(rx3, ry3, rx4, ry4);
-                DRAW_AddLine(rx4, ry4, rx1, ry1);
-                
-                // 远程炮塔
-                DRAW_AddLine(rRotX(tx1, ty1), rRotY(tx1, ty1), rRotX(tx2, ty2), rRotY(tx2, ty2));
-                DRAW_AddLine(rRotX(tx2, ty2), rRotY(tx2, ty2), rRotX(tx3, ty3), rRotY(tx3, ty3));
-                DRAW_AddLine(rRotX(tx3, ty3), rRotY(tx3, ty3), rRotX(tx4, ty4), rRotY(tx4, ty4));
-                DRAW_AddLine(rRotX(tx4, ty4), rRotY(tx4, ty4), rRotX(tx1, ty1), rRotY(tx1, ty1));
-                
-                // 远程炮管
-                DRAW_AddLine(remoteData.x, remoteData.y, remoteData.x + 100*r_cos, remoteData.y + 100*r_sin);
-                
-                // 远程子弹
-                for(int i=0; i<remoteData.bullet_count; i++) {
-                    DRAW_AddCircle(remoteData.bullets[i].x, remoteData.bullets[i].y, 5);
+            // 绘制远程坦克 (仅多人模式)
+            if (tank_is_multiplayer) {
+                TankData remoteData;
+                if(Network_Manager::getRemoteGameData(&remoteData)) {
+                    float r_cos = cos(remoteData.angle);
+                    float r_sin = sin(remoteData.angle);
+                    
+                    // 远程坦克车身
+                    auto rRotX = [&](float x, float y) { return remoteData.x + x*r_cos - y*r_sin; };
+                    auto rRotY = [&](float x, float y) { return remoteData.y + x*r_sin + y*r_cos; };
+                    
+                    float rx1 = rRotX(x1, y1), ry1 = rRotY(x1, y1);
+                    float rx2 = rRotX(x2, y2), ry2 = rRotY(x2, y2);
+                    float rx3 = rRotX(x3, y3), ry3 = rRotY(x3, y3);
+                    float rx4 = rRotX(x4, y4), ry4 = rRotY(x4, y4);
+                    
+                    DRAW_AddLine(rx1, ry1, rx2, ry2);
+                    DRAW_AddLine(rx2, ry2, rx3, ry3);
+                    DRAW_AddLine(rx3, ry3, rx4, ry4);
+                    DRAW_AddLine(rx4, ry4, rx1, ry1);
+                    
+                    // 远程炮塔
+                    DRAW_AddLine(rRotX(tx1, ty1), rRotY(tx1, ty1), rRotX(tx2, ty2), rRotY(tx2, ty2));
+                    DRAW_AddLine(rRotX(tx2, ty2), rRotY(tx2, ty2), rRotX(tx3, ty3), rRotY(tx3, ty3));
+                    DRAW_AddLine(rRotX(tx3, ty3), rRotY(tx3, ty3), rRotX(tx4, ty4), rRotY(tx4, ty4));
+                    DRAW_AddLine(rRotX(tx4, ty4), rRotY(tx4, ty4), rRotX(tx1, ty1), rRotY(tx1, ty1));
+                    
+                    // 远程炮管
+                    DRAW_AddLine(remoteData.x, remoteData.y, remoteData.x + 100*r_cos, remoteData.y + 100*r_sin);
+                    
+                    // 远程子弹
+                    for(int i=0; i<remoteData.bullet_count; i++) {
+                        DRAW_AddCircle(remoteData.bullets[i].x, remoteData.bullets[i].y, 5);
+                    }
                 }
             }
             
@@ -2528,10 +2608,17 @@ static void guiTask(void* pvParameters) {
                     rebuild = true;
                     last_menu_index = -1;
                     exit_timer = 0;
-                    Network_Manager::endGame(0);
+                    if (tank_is_multiplayer) {
+                        Network_Manager::endGame(0);
+                    }
                 }
             } else {
-                status += "Playing...\n";
+                if (!tank_is_multiplayer) {
+                    DRAW_AddString("OFFLINE", 0, 700, 1900, 16, 16);
+                    status += "OFFLINE (Trial)\n";
+                } else {
+                    status += "Playing...\n";
+                }
             }
 
             if(!is_joystick_connected) {
@@ -2750,47 +2837,31 @@ static void guiTask(void* pvParameters) {
 
 static void serialOutputTask(void* pvParameters) {
   unsigned long lastOutputTime = 0;
-  const unsigned long outputInterval = 200; // 200ms 间隔
+  const unsigned long outputInterval = 10000; // 200ms 间隔
   //循环输出触摸值
   for (;;) {
     if (millis() - lastOutputTime >= outputInterval) {
       lastOutputTime = millis();
-      Serial.printf("Touch(Cap): U=%d D=%d L=%d R=%d\n", 
+/*       Serial.printf("Touch(Cap): U=%d D=%d L=%d R=%d\n", 
         touchRead(TOUCH_UP), 
         touchRead(TOUCH_DOWN), 
         touchRead(TOUCH_LEFT), 
-        touchRead(TOUCH_RIGHT));
+        touchRead(TOUCH_RIGHT)); */
+        
     }
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
 static void joystickCheckTask(void* pvParameters) {
-    int consecutive_disconnects = 0;
-    
+    // 无线手柄状态检测任务 — 替代原来的有线手柄模拟量检测
     for(;;) {
-        int j1x = analogRead(JOY1_X);
-        int j1y = analogRead(JOY1_Y);
-        int j2x = analogRead(JOY2_X);
-        int j2y = analogRead(JOY2_Y);
-        
-        bool cond1 = (j1x >= 300 && j1x <= 700);
-        bool cond2 = (j1y >= 1 && j1y <= 200);
-        bool cond3 = (j2x >= 400 && j2x <= 1200);
-        bool cond4 = (j2y >= 1 && j2y <= 350);
-        
-        if(cond1 && cond2 && cond3 && cond4) {
-            consecutive_disconnects++;
-        } else {
-            consecutive_disconnects = 0;
+        GamepadData gp;
+        if (Network_Manager::getGamepadData(&gp)) {
             is_joystick_connected = true;
-        }
-        
-        if(consecutive_disconnects >= 10) {
+        } else {
             is_joystick_connected = false;
-            if(consecutive_disconnects > 20) consecutive_disconnects = 20; 
         }
-        
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }

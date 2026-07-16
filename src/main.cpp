@@ -1,5 +1,9 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include "pins.h"
+
+// --- ESP-NOW 无线手柄 MAC 地址 ---
+extern const uint8_t GAMEPAD_SLAVE_MAC[6] = {0x84, 0x0D, 0x8E, 0xBF, 0xC9, 0x3D};
 #include "freertos.h"
 #include "DACoutput.h"
 #include "vector_draw.h"
@@ -81,6 +85,7 @@ void setup() {
   
   Serial.printf("Flash Size: %d MB\n", ESP.getFlashChipSize() / (1024 * 1024));
   Serial.printf("PSRAM Size: %d MB\n", ESP.getPsramSize() / (1024 * 1024));
+  Serial.printf("MAC: %s\n", WiFi.macAddress().c_str());
 
   // 初始化手柄按键 (使用内部上拉，按下为 LOW)
   pinMode(JOY1_SW, INPUT_PULLUP);
@@ -182,8 +187,11 @@ void loop() {
     ledState = !ledState;
     digitalWrite(1,ledState);
     digitalWrite(2,!ledState);
-    char buffer[100];
-    snprintf(buffer, sizeof(buffer), "JOY1X:%d JOY1Y:%d JOY2X:%d JOY2Y:%d S1:%d S2:%d A:%d B:%d ENC:%d", analogRead(JOY1_X), analogRead(JOY1_Y), analogRead(JOY2_X), analogRead(JOY2_Y), digitalRead(JOY1_SW), digitalRead(JOY2_SW), digitalRead(JOY_A), digitalRead(JOY_B), encoderValue);
-  Serial.println(buffer);
+    
+    static unsigned long last_mac_print = 0;
+    if (millis() - last_mac_print >= 10000) {
+      last_mac_print = millis();
+      Serial.printf("MAC: %s\n", WiFi.macAddress().c_str());
+    }
   
 }
