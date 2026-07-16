@@ -1283,8 +1283,6 @@ static void guiTask(void* pvParameters) {
 
         // 2. 状态机
         bool rebuild = false;
-        // AI Chat 退出冷却：退出后 500ms 内禁止重入（防弹跳 + 等 cleanup 完成）
-        static unsigned long ai_chat_exit_blocked_until = 0;
 
         // 全局游戏请求检查 (用于非阻塞状态)
         uint8_t reqGameId;
@@ -1337,11 +1335,6 @@ static void guiTask(void* pvParameters) {
                     last_menu_index = -1;
                     continue;
                 } else if (menu_index == 5) {
-                    // 退出冷却：防止 auto-return 后按钮弹跳导致误重入
-                    if (millis() < ai_chat_exit_blocked_until) {
-                        Serial.println("[AICHAT] Entry blocked by exit cooldown");
-                        continue;
-                    }
                     ui_state = UI_AI_CHAT;
                     last_menu_index = -1;
                     AI_Chat_Start();
@@ -2649,11 +2642,41 @@ static void guiTask(void* pvParameters) {
             if (last_menu_index == -1) {
                 ai_chat_enter_ms = millis();
                 ai_reply_dirty = true;
-                ai_reply_line_count = 0;   // 清空上一轮残留的回复
-                ai_reply_scroll = 0;        // 滚动复位
             }
 
-            // ---- 先检查语音动作（必须在 ai_chat_active 检查之前，否则 action 丢失）----
+            // ---- 编码器：REPLY/DONE 阶段滚动文本，其余阶段退出 ----
+            if (enc_delta != 0 && (millis() - ai_chat_enter_ms > 500) && ai_chat_phase != AI_PHASE_RECORDING) {
+                if (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_DONE) {
+                    // 滚动文本
+                    int max_scroll = max(0, ai_reply_line_count - AI_REPLY_MAX_VISIBLE);
+                    ai_reply_scroll = constrain(ai_reply_scroll - enc_delta, 0, max_scroll);
+                    last_menu_index = -1; // 强制重绘
+                } else {
+                    // 其他阶段 → 退出
+                    AI_Chat_Stop();
+                    ui_state = UI_MENU_MAIN;
+                    menu_index = 5;
+                    last_menu_index = -1;
+                    rebuild = true;
+                    continue;
+                }
+            }
+
+            // ---- 短按（释放时触发）：退出到主菜单 ----
+            // 注意：DONE 阶段由 ai_chat_task 内部轮询按钮（长按=继续，短按=退出）
+            // guiTask 仅在 REPLY/ERROR 阶段处理退出
+            if (btn_pressed && (millis() - ai_chat_enter_ms > 500)) {
+                if (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_ERROR) {
+                    AI_Chat_Stop();
+                    ui_state = UI_MENU_MAIN;
+                    menu_index = 5;
+                    last_menu_index = -1;
+                    rebuild = true;
+                    continue;
+                }
+            }
+
+            // ---- 检查语音动作 ----
             if (voice_pending) {
                 VC_Action act = voice_action;
                 voice_pending = false;
@@ -2695,53 +2718,6 @@ static void guiTask(void* pvParameters) {
                 last_menu_index = -1;
                 rebuild = true;
                 continue;
-            }
-
-            // ★ 如果 AI Chat 任务已退出（无待处理动作），自动返回主菜单
-            if (!ai_chat_active) {
-                ui_state = UI_MENU_MAIN;
-                menu_index = 0;  // 回到菜单顶部，不选中 AI Chat，防弹跳误触
-                last_menu_index = -1;
-                rebuild = true;
-                // 同步按钮状态，防止 continue 跳过 last_btn_state 更新后弹跳误触发 btn_pressed
-                last_btn_state = digitalRead(EN_S);
-                // ★ 冷却：退出后 800ms 内禁止 AI Chat 重入，让旧任务 cleanup 彻底完成
-                ai_chat_exit_blocked_until = millis() + 800;
-                continue;
-            }
-
-            // ---- 编码器：REPLY/DONE 阶段滚动文本，其余阶段退出 ----
-            if (enc_delta != 0 && (millis() - ai_chat_enter_ms > 500) && ai_chat_phase != AI_PHASE_RECORDING) {
-                if (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_DONE) {
-                    // 滚动文本
-                    int max_scroll = max(0, ai_reply_line_count - AI_REPLY_MAX_VISIBLE);
-                    ai_reply_scroll = constrain(ai_reply_scroll - enc_delta, 0, max_scroll);
-                    last_menu_index = -1; // 强制重绘
-                } else {
-                    // 其他阶段 → 退出
-                    AI_Chat_Stop();
-                    ui_state = UI_MENU_MAIN;
-                    menu_index = 0;
-                    last_menu_index = -1;
-                    rebuild = true;
-                    ai_chat_exit_blocked_until = millis() + 800;
-                    continue;
-                }
-            }
-
-            // ---- 短按（释放时触发）：退出到主菜单 ----
-            // 注意：DONE 阶段由 ai_chat_task 内部轮询按钮（长按=继续，短按=退出）
-            // guiTask 仅在 REPLY/ERROR 阶段处理退出
-            if (btn_pressed && (millis() - ai_chat_enter_ms > 500)) {
-                if (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_ERROR) {
-                    AI_Chat_Stop();
-                    ui_state = UI_MENU_MAIN;
-                    menu_index = 0;
-                    last_menu_index = -1;
-                    rebuild = true;
-                    ai_chat_exit_blocked_until = millis() + 800;
-                    continue;
-                }
             }
 
             // ---- 新回复到达时重新分行 ----
