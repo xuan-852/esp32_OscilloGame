@@ -24,6 +24,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <lwip/sockets.h>      // TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT
 #include "ai_config.h"
 
 
@@ -80,9 +81,28 @@ void AI_Chat_Start() {
     if (s_mic) { delete s_mic; s_mic = nullptr; }
     // 防止 WiFi 省电中断 HTTPS（录音+ASR 耗时久，省电会断联）
     WiFi.setSleep(false);
-    delay(500);  // 等待 WiFi 模组完全唤醒（否则第二次 HTTPS/SSL 握手会失败）
-    // 重置阶段
-    ai_chat_phase = AI_PHASE_IDLE;
+    delay(500);  // 等待 WiFi 模组完全唤醒
+
+    // ★ 检测 SSL/TCP 是否存活：WiFi 已连 + Token 缓存 + SSL 连接活着
+    //   如果全部就绪，跳过 CONNECTING 画面，直接进 WAITING
+    bool ssl_alive = s_deepseek_inited && s_ds_client.connected();
+    bool wifi_ok   = (WiFi.status() == WL_CONNECTED);
+    bool token_ok  = (strlen(baidu_token) > 0 && millis() / 1000 < token_expires);
+
+    if (ssl_alive && wifi_ok && token_ok) {
+        // SSL 保活 → 零开销复用，直接让用户按 ENTER 开始
+        strncpy(ai_chat_display_text, phase_text(AI_PHASE_WAITING), sizeof(ai_chat_display_text) - 1);
+        ai_chat_display_text[sizeof(ai_chat_display_text) - 1] = '\0';
+        ai_chat_phase = AI_PHASE_WAITING;
+        Serial.println("[AICHAT] SSL alive, skipping init display");
+    } else {
+        // 首次进入或连接已断 → 显示初始化状态
+        strncpy(ai_chat_display_text, phase_text(AI_PHASE_CONNECTING), sizeof(ai_chat_display_text) - 1);
+        ai_chat_display_text[sizeof(ai_chat_display_text) - 1] = '\0';
+        ai_chat_phase = AI_PHASE_CONNECTING;
+        Serial.println("[AICHAT] init display: CONNECTING");
+    }
+    ai_chat_dirty = true;
 
     ai_chat_active = true;
     if (xTaskCreatePinnedToCore(ai_chat_task, "AIChatTask", 16384, NULL, 1, &s_aiChatTaskHandle, 0) != pdPASS) {
@@ -246,7 +266,23 @@ static String baidu_asr(const int16_t* pcm, size_t samples) {
     return result[0].as<String>();
 }
 
-// ---- DeepSeek 对话（HTTPClient 静态单例 + 断连时完整清理）
+// ---- TCP 保活 — 防止 DeepSeek 服务器空闲超时断开 ----
+// 在第一次成功 POST 后调用，lwIP 内核自动发空探测包维持 TCP
+static void enable_tcp_keepalive() {
+    int fd = s_ds_client.fd();
+    if (fd < 0) { Serial.println("[DSEEK] keepalive: no fd yet"); return; }
+    int keepalive = 1;
+    int keepidle  = 30;   // 空闲 30s 后开始探测
+    int keepintvl = 10;   // 每次探测间隔 10s
+    int keepcnt   = 4;    // 连续 4 次无响应 → 判定断开（总计 30+40=70s）
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &keepidle,  sizeof(keepidle));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &keepcnt,   sizeof(keepcnt));
+    Serial.println("[DSEEK] TCP keepalive enabled (30s idle, 10s intvl, 4 probes)");
+}
+
+// ---- DeepSeek 对话（HTTPClient 静态单例 + TCP 保活）
 // s_ds_client + s_http 都是全局静态对象，永远不析构 → SSL/TLS 连接永不意外被释放
 // 核心策略：
 //   1. TCP 连接幸存 → HTTPClient::connect() 检测 connected()=true，零开销复用
@@ -335,7 +371,7 @@ static String deepseek_chat(const String& text) {
 
         JsonObject user = messages.add<JsonObject>();
         user["role"] = "user";
-        user["content"] = text;
+        user["content"] = String(text) + "\n\n[MUST REPLY IN ENGLISH ONLY]";
 
         String body;
         serializeJson(req_doc, body);
@@ -370,6 +406,9 @@ static String deepseek_chat(const String& text) {
         // ★ 不调 end() — getString 内部已调 disconnect(true)，keep-alive 时 TCP/SSL 保持，
         //   Connection:close 时 _client 指针保留，下次 connect() 自动重连 SSL。headers 用
         //   replace=true 替换不累积。
+
+        // ---- 每次成功 HTTP 200 后保证 TCP 保活开启（幂等，重连后新 fd 同样生效）----
+        enable_tcp_keepalive();
 
         // 打印原始响应
         Serial.println("===== DEEPSEEK RAW RESPONSE (first 500 chars) =====");
@@ -455,15 +494,11 @@ static void ai_chat_task(void* pvParameters) {
     bool has_action = false;
     uint8_t saved_step = 16;  // 绱у噾妯″紡
 
-    ai_chat_phase = AI_PHASE_IDLE;
-    ai_chat_dirty = true;
-
+    // AI_Chat_Start() 已设 CONNECTING，初始化完成后对话循环内才切到 WAITING
     Serial.printf("[AICHAT] heap free: %u\n", ESP.getFreeHeap());
 
-    // ---- 鏄剧ず "Press ENTER to record" ----
+    // ---- 设置 step（矢量子系统参数） ----
     DRAW_SetStepSize(saved_step);
-    ai_show(AI_PHASE_WAITING, "");
-    Serial.println("[AICHAT] phase=WAITING");
 
     // ---- Init MIC ----
     Serial.println("[AICHAT] init MIC...");
@@ -673,8 +708,11 @@ static void ai_chat_task(void* pvParameters) {
 done:
     Serial.println("[AICHAT] cleanup...");
     ai_chat_dirty = true;
+    // ★ 显式释放栈上 String（vTaskDelete 不调 C++ 析构函数，内部堆缓冲会泄漏）
+    recognized = String();   // 释放 baidu_asr 结果的内部缓冲
+    reply = String();        // 释放 deepseek_chat 结果的内部缓冲
     // ★ SSL/HTTP 单例默认保持 — s_ds_client + s_http 是全局静态，不析构。
-    //   如果 TCP 活着 → 下次 deepseek_chat() 零开销复用。
+    //   如果 TCP 活着(保活开启) → 下次 deepseek_chat() 零开销复用。
     //   如果 TCP 断了 → deepseek_chat() 内自动 stop + delay + 重连。
     if (s_mic) { delete s_mic; s_mic = nullptr; }
     if (pcm_buffer) { free(pcm_buffer); Serial.println("[AICHAT] pcm_buffer freed"); }

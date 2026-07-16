@@ -1335,6 +1335,12 @@ static void guiTask(void* pvParameters) {
                     last_menu_index = -1;
                     continue;
                 } else if (menu_index == 5) {
+                    if (ai_chat_active) {
+                        // 防残留调用：AI Chat 已在运行，忽略重入
+                        continue;
+                    }
+                    // ★ 进入前重置编码器跟踪，防止残留 enc_delta 触发即时退出
+                    last_encoder = current_encoder;
                     ui_state = UI_AI_CHAT;
                     last_menu_index = -1;
                     AI_Chat_Start();
@@ -2652,10 +2658,10 @@ static void guiTask(void* pvParameters) {
                     ai_reply_scroll = constrain(ai_reply_scroll - enc_delta, 0, max_scroll);
                     last_menu_index = -1; // 强制重绘
                 } else {
-                    // 其他阶段 → 退出
+                    // 其他阶段 → 退出。不设 menu_index=5（防立即重进死循环）
                     AI_Chat_Stop();
                     ui_state = UI_MENU_MAIN;
-                    menu_index = 5;
+                    menu_index = 4;  // ← 落到 Game Joy 项，避免 menu_index=5 立即重进
                     last_menu_index = -1;
                     rebuild = true;
                     continue;
@@ -2730,7 +2736,7 @@ static void guiTask(void* pvParameters) {
                 DRAW_Clear();
                 DRAW_AddRect(0, 0, 2047, 2047);
 
-                if (ai_chat_phase == AI_PHASE_WAITING) {
+                if (ai_chat_phase == AI_PHASE_IDLE || ai_chat_phase == AI_PHASE_WAITING) {
                     DRAW_AddString("AI CHAT", 0, 600, 1800, 30, 30);
                     DRAW_AddString(ai_chat_display_text, 0, 100, 1200, 22, 22);
                     DRAW_AddString("PRESS ENTER", 0, 300, 600, 20, 20);
