@@ -2545,7 +2545,6 @@ static void guiTask(void* pvParameters) {
         } else if (ui_state == UI_AI_CHAT) {
             // 进入 AI Chat 后的忽略按钮时间戳
             static unsigned long ai_chat_enter_ms = 0;
-            static unsigned long ai_btn_down_ms = 0;   // 按钮按下时刻（用于长按检测）
             // 持久化分行缓冲区（30行×36字节，覆盖~540字符的回复）
             static char ai_reply_lines[60][36];
             static int  ai_reply_line_count = 0;
@@ -2556,34 +2555,6 @@ static void guiTask(void* pvParameters) {
             if (last_menu_index == -1) {
                 ai_chat_enter_ms = millis();
                 ai_reply_dirty = true;
-            }
-
-            // ---- 长按检测（按住时触发，不等释放）----
-            // 在 REPLY/DONE 阶段按住 500ms → 连续对话（直接开始录音）
-            static bool ai_long_press_triggered = false;
-            if (btn_state == LOW) {
-                unsigned long held_ms = millis() - ai_btn_down_ms;
-                bool is_reply_or_done = (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_DONE);
-                if (held_ms >= 500 && !ai_long_press_triggered && is_reply_or_done) {
-                    ai_long_press_triggered = true;
-                    Serial.println("[AICHAT] Hold 500ms, continuing conversation (record while held)...");
-                    ai_continue_mode = true;
-                    AI_Chat_Stop();
-                    for (int w = 0; w < 25 && ai_chat_active; w++) vTaskDelay(pdMS_TO_TICKS(20));
-                    ai_reply_dirty = true;
-                    ai_reply_line_count = 0;
-                    ai_reply_scroll = 0;
-                    last_menu_index = -1;
-                    rebuild = true;
-                    AI_Chat_Start();
-                    continue;
-                }
-            } else {
-                ai_long_press_triggered = false;
-            }
-            // 记录按钮按下时刻（下降沿）
-            if (btn_state == LOW && last_btn_state == HIGH) {
-                ai_btn_down_ms = millis();
             }
 
             // ---- 编码器：REPLY/DONE 阶段滚动文本，其余阶段退出 ----
@@ -2605,19 +2576,16 @@ static void guiTask(void* pvParameters) {
             }
 
             // ---- 短按（释放时触发）：退出到主菜单 ----
-            // btn_pressed 是上升沿（释放），仅当按下的持续时间 < 500ms 才视为短按
+            // 注意：DONE 阶段由 ai_chat_task 内部轮询按钮（长按=继续，短按=退出）
+            // guiTask 仅在 REPLY/ERROR 阶段处理退出
             if (btn_pressed && (millis() - ai_chat_enter_ms > 500)) {
-                unsigned long hold_ms = millis() - ai_btn_down_ms;
-                if (hold_ms < 500) {
-                    bool is_reply_or_done = (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_DONE);
-                    if (is_reply_or_done || ai_chat_phase == AI_PHASE_ERROR) {
-                        AI_Chat_Stop();
-                        ui_state = UI_MENU_MAIN;
-                        menu_index = 5;
-                        last_menu_index = -1;
-                        rebuild = true;
-                        continue;
-                    }
+                if (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_ERROR) {
+                    AI_Chat_Stop();
+                    ui_state = UI_MENU_MAIN;
+                    menu_index = 5;
+                    last_menu_index = -1;
+                    rebuild = true;
+                    continue;
                 }
             }
 
