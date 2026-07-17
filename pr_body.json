@@ -1,0 +1,6 @@
+﻿{
+  "title": "feat(ai_chat): TCP keepalive保活 + SSL复用优化 \u0026 防重入保护",
+  "head": "xuan-852:master",
+  "base": "master",
+  "body": "### 改动内容\n\n**1. AI Chat TCP/SSL 保活**\n- 新增 `enable_tcp_keepalive()`，lwIP setsockopt 配置空闲30s+探测10s×4次，防止DeepSeek服务器空闲超时断开\n- ssl_alive 检测逻辑：WiFi已连 + Token未过期 + SSL connected() → 跳过CONNECTING画面直达WAITING，零开销复用SSL\n- user content 追加 [MUST REPLY IN ENGLISH ONLY] 防止中文回复破坏解析\n- done标签处显式释放栈上 String，避免 vTaskDelete 不调C++析构导致内存泄漏\n\n**2. AI Chat 防重入/防死循环**\n- guiTask 中 menu_index==5 入口增加 ai_chat_active 判断，防止AI已在运行时再次进入\n- 退出 AI Chat 时将 menu_index 设为4而非5，避免退出后立即被menu_index==5的条件再次触发，形成死循环\n- DRAW 页面增加 AI_PHASE_IDLE 显示覆盖，避免黑屏无提示问题"
+}

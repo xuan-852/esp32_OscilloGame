@@ -2636,6 +2636,22 @@ static void guiTask(void* pvParameters) {
             updateWebUIStatus(status);
 
         } else if (ui_state == UI_AI_CHAT) {
+            // ★ 兜底：如果 ai_chat_active 已 false → task 已死，自动退出
+            //   AI_Chat_Start() 先设 ai_chat_active=true 再创建 task，
+            //   所以进入时 !ai_chat_active 只可能由 task 创建失败导致。
+            if (!ai_chat_active) {
+                if (ai_chat_phase == AI_PHASE_IDLE) {
+                    Serial.println("[AICHAT] guiTask: task creation failed, auto-exiting");
+                } else {
+                    Serial.println("[AICHAT] guiTask: task dead, auto-exiting");
+                }
+                ui_state = UI_MENU_MAIN;
+                menu_index = 5;
+                last_menu_index = -1;
+                rebuild = true;
+                continue;
+            }
+
             // 进入 AI Chat 后的忽略按钮时间戳
             static unsigned long ai_chat_enter_ms = 0;
             // 持久化分行缓冲区（30行×36字节，覆盖~540字符的回复）

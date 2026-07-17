@@ -5,10 +5,11 @@
 
 #include <Arduino.h>
 
-// AI Chat state
+// AI Chat 是否正在运行
 extern volatile bool ai_chat_active;
 
-// 阶段式显示 — 每个阶段显示对应提示（数值必须与 freertos.cpp 一致）
+// AI Chat 阶段枚举 — 每个阶段对应不同的屏幕提示
+// 数值必须与 freertos.cpp 中的 guiTask 一致
 enum AIChatPhase {
     AI_PHASE_IDLE       = 0,
     AI_PHASE_CONNECTING = 1,
