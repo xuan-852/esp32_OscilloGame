@@ -1266,6 +1266,12 @@ static void guiTask(void* pvParameters) {
         if (test_ai_enter) {
             test_ai_enter = false;
             Serial.println("[TEST] guiTask: test_ai_enter");
+            // ★ 如果任务还在运行（上一轮未正确退出），先 Stop 清干净再重入
+            if (ai_chat_active) {
+                Serial.println("[TEST] guiTask: AI still active, stopping first");
+                AI_Chat_Stop();
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
             last_encoder = current_encoder;
             ui_state = UI_AI_CHAT;
             last_menu_index = -1;
@@ -1275,13 +1281,12 @@ static void guiTask(void* pvParameters) {
         if (test_ai_exit) {
             test_ai_exit = false;
             Serial.println("[TEST] guiTask: test_ai_exit");
-            if (ui_state == UI_AI_CHAT) {
-                AI_Chat_Stop();
-                ui_state = UI_MENU_MAIN;
-                menu_index = 5;
-                last_menu_index = -1;
-                continue;
-            }
+            // ★ 不检查 ui_state —— 测试信号应始终生效
+            AI_Chat_Stop();
+            ui_state = UI_MENU_MAIN;
+            menu_index = 5;
+            last_menu_index = -1;
+            continue;
         }
         // 注意: 不在 UI_AI_CHAT 下消费 test_btn_triggered, 留给 ai_chat_task DONE 轮询使用
         if (test_btn_triggered && ui_state != UI_AI_CHAT) {
@@ -2664,15 +2669,13 @@ static void guiTask(void* pvParameters) {
             updateWebUIStatus(status);
 
         } else if (ui_state == UI_AI_CHAT) {
-            // ★ 兜底：如果 ai_chat_active 已 false → task 已死，自动退出
+            // ★ 兜底：如果 ai_chat_active == false 且 phase==IDLE → 任务已停止，自动退出
             //   AI_Chat_Start() 先设 ai_chat_active=true 再创建 task，
-            //   所以进入时 !ai_chat_active 只可能由 task 创建失败导致。
-            if (!ai_chat_active) {
-                if (ai_chat_phase == AI_PHASE_IDLE) {
-                    Serial.println("[AICHAT] guiTask: task creation failed, auto-exiting");
-                } else {
-                    Serial.println("[AICHAT] guiTask: task dead, auto-exiting");
-                }
+            //   所以 !ai_chat_active + IDLE 只可能由 Stop 或 task 创建失败导致。
+            //   注意：conversation_done 后 ai_chat_active=false 但 phase 不是 IDLE
+            //   （仍为 DONE/REPLY），此时 task 在等下一轮信号量，不可退出。
+            if (!ai_chat_active && ai_chat_phase == AI_PHASE_IDLE) {
+                Serial.println("[AICHAT] guiTask: task stopped or creation failed, auto-exiting");
                 ui_state = UI_MENU_MAIN;
                 menu_index = 5;
                 last_menu_index = -1;

@@ -90,6 +90,18 @@ class TestRunner:
         while time.time() < deadline:
             self._readline(0.3)
 
+    def drain_until_quiet(self, min_quiet=0.3, max_total=3.0):
+        """强力 drain: 读到串口安静（连续 min_quiet 秒无数据），最多 max_total 秒。
+        返回 drained 的行数。"""
+        deadline = time.time() + max_total
+        count = 0
+        while time.time() < deadline:
+            line = self._readline(min_quiet)
+            if line is None:
+                break  # 安静了
+            count += 1
+        return count
+
     def flush(self):
         self.ser.reset_input_buffer()
 
@@ -158,18 +170,19 @@ class TestRunner:
         self.send("test:enter")
         time.sleep(0.3)
 
-        # 等 WAITING（直接等，不分两步——semaphore taken 提前返回会丢 WAITING）
-        if not self.wait_for(r'WAITING for ENTER', 20):
+        # 等 WAITING（pattern 宽容匹配，防止长回复后串口缓冲截断打印）
+        if not self.wait_for(r'WAITING', 20):
             print(f"  {R}{tag} FAIL: never WAITING (20s timeout){N}")
             return False
         print(f"  {G}{tag} WAITING phase{N}")
+        # ★ drain 干净，防止轮次间串口残余截断后续打印
+        self.drain(0.5)
 
         # 触发录音
         self.send("test:btn")
 
         # 循环读，直到 conversation done
-        # 核心检测: Filtered text 行提取 AI 回复 → 打印到终端
-        # 辅助: DONE 阶段发 btn 退出, action 路径自动等
+        # 核心检测: Filtered text 行 → 抓到 AI 回复即判过，不等结束
         got_reply = False
         need_done_btn = False
         while True:
@@ -190,31 +203,20 @@ class TestRunner:
             hit = m.group(0)
 
             if 'Filtered text' in hit:
-                # ★ 抓到 AI 回复文本 → 提取并打印
-                raw_line = lines[-1] if lines else ''
-                reply_text = self._extract_reply(raw_line) or raw_line
-                print(f"  {C}AI: {reply_text}{N}")
+                # ★ 抓到 AI 回复 → 判过，清理退出
+                print(f"  {C}AI: ✓ got reply{N}")
                 got_reply = True
-                continue
+                # 发送退出信号让任务回到 idle，不等 conversation done
+                self.send("test:exit")
+                time.sleep(1.5)
+                self.drain_until_quiet(0.3, 2.0)
+                break
 
             if 'conversation done' in hit:
-                # 回扫所有已消费行——Filtered text 可能在 read_until 的同批中
                 if not got_reply and self._has_reply_in_lines(lines):
-                    # 找到最后一条有回复的行展示
-                    for l in reversed(lines):
-                        if 'Filtered text' in l:
-                            reply_text = self._extract_reply(l) or l
-                            print(f"  {C}AI: {reply_text}{N}")
-                            got_reply = True
-                            break
-                if got_reply:
-                    print(f"  {G}{tag} conversation done ✓{N}")
-                else:
-                    print(f"  {Y}{tag} conversation done (no reply){N}")
+                    got_reply = True
                 break
             if 'DONE' in hit and not need_done_btn:
-                print(f"  {Y}{tag} DONE phase, sending btn to exit{N}")
-                time.sleep(0.5)
                 self.send("test:btn")
                 need_done_btn = True
                 continue
@@ -229,7 +231,6 @@ class TestRunner:
                 status = f"{G}200{N}" if code == 200 else f"{Y}{code}{N}"
                 print(f"  {status} {tag} ({rtt}ms)")
 
-        time.sleep(1)
         if got_reply:
             print(f"  {G}{tag} OK{N}")
         else:

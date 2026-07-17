@@ -564,6 +564,8 @@ static void ai_chat_task(void* pvParameters) {
                 }
             }
         }
+        // ★ WiFi 阶段后检查退出信号
+        if (!ai_chat_active) { Serial.println("[AICHAT] cancelled after WiFi"); continue; }
 
         // ---- Baidu token（首次或过期重获）----
         if (strlen(baidu_token) == 0 || millis() / 1000 >= token_expires) {
@@ -576,6 +578,8 @@ static void ai_chat_task(void* pvParameters) {
             }
             Serial.println("[AICHAT] Baidu token OK");
         }
+        // ★ Baidu token 后检查退出信号
+        if (!ai_chat_active) { Serial.println("[AICHAT] cancelled after Baidu token"); continue; }
 
         // ========== 内层对话循环（支持同一轮次内 re-record）==========
         while (ai_chat_active) {
@@ -644,6 +648,8 @@ static void ai_chat_task(void* pvParameters) {
     }
 
     Serial.printf("[AICHAT] recording done: %.1fs (%zu samples)\n", (float)total_samples / SAMPLE_RATE, total_samples);
+    // ★ 录音后检查退出信号
+    if (!ai_chat_active) { Serial.println("[AICHAT] cancelled after recording"); goto conversation_done; }
 
     if (total_samples < SAMPLE_RATE / 4) {
         Serial.println("[AICHAT] recording too short!");
@@ -691,8 +697,16 @@ static void ai_chat_task(void* pvParameters) {
             }
             reply = deepseek_chat(recognized);
             if (reply.length() > 0) break;
+            // ★ 重试前检查退出信号
+            if (!ai_chat_active) { Serial.println("[AICHAT] cancelled during retry delay"); goto conversation_done; }
             attempt++;
         }
+    }
+
+    // ★ DeepSeek 返回后立即检查退出信号
+    if (!ai_chat_active) {
+        Serial.println("[AICHAT] cancelled after DeepSeek, fast exit");
+        goto conversation_done;
     }
 
     if (reply.length() == 0) {
