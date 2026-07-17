@@ -97,6 +97,10 @@ public:
     static bool isRemoteGameEnded(uint8_t* reasonOut);
     static void clearRemoteGameEnded();
 
+    // --- AI Chat 射频冲突规避 ---
+    static void suspend_esp_now();              // 暂停 ESP-NOW（保留 WiFi）
+    static void resume_esp_now();               // 恢复 ESP-NOW
+
     // --- 无线手柄 API ---
     static bool isGamepadConnected();           // 手柄是否在线
     static bool getGamepadData(GamepadData* out); // 获取最新手柄数据

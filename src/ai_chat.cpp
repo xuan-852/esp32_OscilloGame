@@ -24,7 +24,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <lwip/sockets.h>      // TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT
+#include <esp_heap_caps.h>     // heap_caps_get_largest_free_block
 #include "ai_config.h"
 
 
@@ -38,9 +38,10 @@ static Microphone* s_mic = nullptr;
 static char baidu_token[256] = {0};
 static unsigned long token_expires = 0;
 static TaskHandle_t s_aiChatTaskHandle = NULL;
-static WiFiClientSecure s_ds_client;           // 复用 SSL session（全局单例，永远不析构）
-static HTTPClient s_http;                       // 复用 HTTPClient（全局单例，永远不析构）
-static bool s_deepseek_inited = false;          // s_http 已 begin() + 设置好 headers
+static SemaphoreHandle_t s_aiChatSemaphore = NULL;  // 唤醒持久任务的信号量
+// 注意：WiFiClientSecure + HTTPClient 现在使用局部对象（每轮对话创建）
+// 因为 DeepSeek 服务器主动发送 Connection: close，每轮 SSL 必然断开
+// 全局保活无意义，改用局部对象避免 end()/begin() 循环脏状态
 
 static bool     wifi_connect();
 static bool     wifi_ensure();
@@ -66,50 +67,33 @@ static const char* phase_text(AIChatPhase phase) {
 
 void AI_Chat_Start() {
     // SSL/HTTP 单例 — 全局静态对象永远不析构。退出重进时，SSL/TCP 连接保持存活。
-    // deepseek_chat() 内部自动处理 TCP 保活/断连重连。
-    // ★ 旧 task 优先自然退出：AI_Chat_Stop() 已设 ai_chat_active=false，
-    //   等待 task 自删（最多 1s），超时再强杀 vTaskDelete
-    if (s_aiChatTaskHandle != NULL) {
-        ai_chat_active = false;  // 确保旧 task 收到退出信号
-        int wait = 0;
-        while (s_aiChatTaskHandle != NULL && wait < 50) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            wait++;
-        }
-        if (s_aiChatTaskHandle != NULL) {
-            Serial.println("[AICHAT] Timeout, force-killing stale task");
-            vTaskDelete(s_aiChatTaskHandle);
-        }
-        s_aiChatTaskHandle = NULL;
+    // ★ A1 Task 永活方案：首次创建持久任务+信号量，后续只给信号量唤醒。
+    //   永不删除任务 → 栈只分配一次 → 零碎片、零回收开销。
+
+    // 防重入：如果任务正在运行（已有信号量在执行中），忽略本次请求
+    if (ai_chat_active) {
+        Serial.println("[AICHAT] already running, ignoring Start");
+        return;
     }
-    // ★ 让空闲任务回收旧 task 栈内存
-    //   vTaskDelete(NULL) 不立即释放栈 → 需空闲任务运行后才能回收。
-    //   不加此延迟 → 64KB 旧栈仍被占用 → xTaskCreatePinnedToCore 分配 64KB 失败 → task 静默死亡
-    vTaskDelay(pdMS_TO_TICKS(100));
 
     // 清除可能残留的语音动作（防止上一轮未消费）
     voice_pending = false;
     voice_action = VC_NONE;
-    // 清除残留的 MIC 指针
-    if (s_mic) { delete s_mic; s_mic = nullptr; }
-    // 防止 WiFi 省电中断 HTTPS（录音+ASR 耗时久，省电会断联）
+    // 防止 WiFi 省电中断 HTTPS
     WiFi.setSleep(false);
-    delay(500);  // 等待 WiFi 模组完全唤醒
+    delay(500);   // ★ 等待射频完全恢复
 
-    // 检测 SSL/TCP 是否存活：WiFi 已连 + Token 缓存 + SSL 连接活跃
-    // 如果全部就绪，跳过 CONNECTING 画面，直接进 WAITING
-    bool ssl_alive = s_deepseek_inited && s_ds_client.connected();
+    // 检测是否可跳过 init 阶段：WiFi 已连 + Token 缓存
+    // 注意：不检查 SSL 存活 — DeepSeek 服务器主动 Connection:close，每轮新连
     bool wifi_ok   = (WiFi.status() == WL_CONNECTED);
     bool token_ok  = (strlen(baidu_token) > 0 && millis() / 1000 < token_expires);
 
-    if (ssl_alive && wifi_ok && token_ok) {
-    // SSL 存活 → 零开销复用，直接进入等待录音状态
+    if (wifi_ok && token_ok) {
         strncpy(ai_chat_display_text, phase_text(AI_PHASE_WAITING), sizeof(ai_chat_display_text) - 1);
         ai_chat_display_text[sizeof(ai_chat_display_text) - 1] = '\0';
         ai_chat_phase = AI_PHASE_WAITING;
         Serial.println("[AICHAT] SSL alive, skipping init display");
     } else {
-        // 首次进入或连接已断 → 显示初始化状态
         strncpy(ai_chat_display_text, phase_text(AI_PHASE_CONNECTING), sizeof(ai_chat_display_text) - 1);
         ai_chat_display_text[sizeof(ai_chat_display_text) - 1] = '\0';
         ai_chat_phase = AI_PHASE_CONNECTING;
@@ -117,27 +101,63 @@ void AI_Chat_Start() {
     }
     ai_chat_dirty = true;
 
-    ai_chat_active = true;
-    if (xTaskCreatePinnedToCore(ai_chat_task, "AIChatTask", 16384, NULL, 1, &s_aiChatTaskHandle, 0) != pdPASS) {
-        Serial.println("[AICHAT] FAILED to create task!");
-        ai_chat_active = false;
-        s_aiChatTaskHandle = NULL;
-        // 复位 phase/text 防止 guiTask 死锁在 WAITING 画面
-        ai_chat_phase = AI_PHASE_IDLE;
-        ai_chat_display_text[0] = '\0';
-        ai_chat_dirty = true;
+    // 首次：创建持久任务和信号量
+    if (s_aiChatTaskHandle == NULL) {
+        Serial.printf("[AICHAT] creating persistent task, heap=%u\n", ESP.getFreeHeap());
+        if (xTaskCreatePinnedToCore(ai_chat_task, "AIChatTask", 8192, NULL, 1, &s_aiChatTaskHandle, 0) != pdPASS) {
+            Serial.printf("[AICHAT] FAILED to create task! heap=%u\n", ESP.getFreeHeap());
+            ai_chat_active = false;
+            s_aiChatTaskHandle = NULL;
+            ai_chat_phase = AI_PHASE_IDLE;
+            ai_chat_display_text[0] = '\0';
+            ai_chat_dirty = true;
+            return;
+        }
+        if (s_aiChatSemaphore == NULL) {
+            s_aiChatSemaphore = xSemaphoreCreateBinary();
+        }
     }
+
+    // 激活并唤醒任务
+    ai_chat_active = true;
+    xSemaphoreGive(s_aiChatSemaphore);
+    Serial.println("[AICHAT] semaphore given, task will start conversation");
 }
 
 void AI_Chat_Stop() {
     ai_chat_active = false;
-    // 如果任务仍在运行，等待其自然退出（task 内检测 ai_chat_active 会 goto done）
+    // 给信号量让任务从等待/阻塞中唤醒，进入 done 清理后回到 idle
+    if (s_aiChatSemaphore != NULL) {
+        xSemaphoreGive(s_aiChatSemaphore);
+    }
 }
 
 // ---- 共享变量（供 guiTask 读取渲染） ----
 char  ai_chat_display_text[2048];
 volatile AIChatPhase ai_chat_phase = AI_PHASE_IDLE;
 volatile bool ai_chat_dirty = false;
+
+// ========== 测试接口 (自动化测试用) ==========
+volatile bool test_ai_enter      = false;
+volatile bool test_ai_exit       = false;
+volatile bool test_btn_pressed   = false;  // true=按下 ENTER
+volatile bool test_btn_triggered = false;  // 单次点击
+volatile bool test_no_mic        = false;  // 跳过 MIC 初始化
+
+// 串口命令分发器 — 从 main.cpp loop() 中调用
+void handle_test_commands() {
+    if (!Serial.available()) return;
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd == "test:enter")       { test_ai_enter = true;      Serial.println("[TEST] set test_ai_enter"); }
+    else if (cmd == "test:exit")   { test_ai_exit = true;       Serial.println("[TEST] set test_ai_exit"); }
+    else if (cmd == "test:btn")    { test_btn_triggered = true; Serial.println("[TEST] set test_btn_triggered"); }
+    else if (cmd == "test:btn_down") { test_btn_pressed = true; Serial.println("[TEST] set test_btn_pressed=1"); }
+    else if (cmd == "test:btn_up")   { test_btn_pressed = false;Serial.println("[TEST] set test_btn_pressed=0"); }
+    else if (cmd == "test:no_mic") { test_no_mic = true;       Serial.println("[TEST] set test_no_mic"); }
+    else if (cmd == "test:mic")    { test_no_mic = false;      Serial.println("[TEST] set test_no_mic=0"); }
+    else if (cmd.length() > 0)     { Serial.printf("[TEST] unknown: \"%s\"\n", cmd.c_str()); }
+}
 
 void ai_show(AIChatPhase phase, const char* text) {
     if (text && strlen(text) > 0) {
@@ -284,33 +304,12 @@ static String baidu_asr(const int16_t* pcm, size_t samples) {
     return result[0].as<String>();
 }
 
-// ---- TCP 保活 — 防止 DeepSeek 服务器空闲超时断开连接 ----
-// 在第一次成功 POST 后调用，lwIP 内核自动发空探测包维持 TCP
-static void enable_tcp_keepalive() {
-    int fd = s_ds_client.fd();
-    if (fd < 0) { Serial.println("[DSEEK] keepalive: no fd yet"); return; }
-    int keepalive = 1;
-    int keepidle  = 30;   // 空闲 30s 后开始探测
-    int keepintvl = 10;   // 每次探测间隔 10s
-    int keepcnt   = 4;    // 连续 4 次无响应 → 判定断开（总计 30+40=70s）
-    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &keepidle,  sizeof(keepidle));
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &keepcnt,   sizeof(keepcnt));
-    Serial.println("[DSEEK] TCP keepalive enabled (30s idle, 10s intvl, 4 probes)");
-}
-
-// ---- DeepSeek 对话（HTTPClient 静态单例 + TCP 保活）
-// s_ds_client + s_http 都是全局静态对象，永远不析构 → SSL/TLS 连接永不意外被释放
-// 核心策略：
-//   1. TCP 连接存活 → HTTPClient::connect() 检测 connected()=true，零开销复用
-//   2. TCP 超时断开 → stop_ssl_socket() 完整释放 mbedTLS + memset
-//                      delay(100) 让堆碎片合并 → 重连（DRAM 大块重新分配，无碎片累积）
-//   3. 退出/重进 → 不碰 SSL，存活连接保持，断连走 #2
+// ---- DeepSeek 对话（局部对象，每轮全新 SSL 握手）
+// 每轮对话创建全新 WiFiClientSecure + HTTPClient 局部对象。
+// DeepSeek 服务器主动发送 Connection: close，SSL 连接每轮必然断开。
+// 用局部对象避免全局复用时的 end()/begin() 循环脏状态。
+// SSL 握手 ~800ms/次，换取绝对可靠的 body 读取。
 static String deepseek_chat(const String& text) {
-    Serial.printf("[DSEEK] heap: %u  WiFi RSSI: %d  SSL.connected: %d\n",
-                  ESP.getFreeHeap(), WiFi.RSSI(), s_ds_client.connected());
-
     // 确保 WiFi 在线
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[DSEEK] WiFi lost, reconnecting...");
@@ -324,44 +323,17 @@ static String deepseek_chat(const String& text) {
         Serial.println("[DSEEK] WiFi reconnected");
     }
 
-    // ---- HTTPClient 单例初始化（只做一次）----
-    // 策略：HTTPClient 和 WiFiClientSecure 都是 static 全局，永不析构。
-    // 响应后用 replace=true 替换 header 避免累积。
-    // getString() 内部 disconnect(true) 在 keep-alive 时不杀 TCP/SSL。
-    // SSL 断连时 → end()+stop()+begin() 完整重建。
-    if (!s_deepseek_inited) {
-        s_ds_client.setInsecure();
-        s_http.setReuse(true);       // HTTP/1.1 keep-alive
-        s_http.setTimeout(30000);    // 响应读超时 30s
-        s_http.addHeader("Content-Type", "application/json");
-        s_http.begin(s_ds_client, "https://api.deepseek.com/chat/completions");
-        s_deepseek_inited = true;
-        Serial.println("[DSEEK] HTTPClient initialized");
-    }
-
-    String result;
-    for (int attempt = 0; attempt < 2 && result.length() == 0; attempt++) {
-        if (attempt > 0) {
-            Serial.printf("[DSEEK] retry %d\n", attempt + 1);
-            // 重试：完整断开清理
-            s_http.end();             // disconnect(false) + clear()
-            s_ds_client.stop();       // stop_ssl_socket → mbedTLS 释放 + socket 关闭 + memset(0)
-            delay(1500);              // 堆碎片合并
-            s_http.addHeader("Content-Type", "application/json");
-            s_http.begin(s_ds_client, "https://api.deepseek.com/chat/completions");
-        }
-
-// ---- TCP/SSL 断连时完整清理重连 ----
-        if (!s_ds_client.connected()) {
-            Serial.println("[DSEEK] SSL not connected, reconnecting...");
-            s_http.end();             // clear() → 擦 _headers
-            s_ds_client.stop();       // stop_ssl_socket → 完整 mbedTLS 释放 + memset(0)
-            delay(100);               // 堆碎片合并
-            s_ds_client.setInsecure();// 标志位
-            s_http.addHeader("Content-Type", "application/json");
-            s_http.begin(s_ds_client, "https://api.deepseek.com/chat/completions");
-            Serial.println("[DSEEK] SSL re-init done");
-        }
+// ---- 创建全新 SSL client + HTTPClient ----
+    WiFiClientSecure client;
+    HTTPClient http;
+    client.setInsecure();
+    http.setTimeout(30000);
+    http.setConnectTimeout(10000);
+    http.useHTTP10(true);
+    http.begin(client, "https://api.deepseek.com/chat/completions");
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", "Bearer " + String(DEEPSEEK_API_KEY));
+    Serial.printf("[DSEEK] heap: %u  WiFi RSSI: %d\n", ESP.getFreeHeap(), WiFi.RSSI());
 
 // ---- 构造 JSON 请求体 ----
         JsonDocument req_doc;
@@ -395,57 +367,48 @@ static String deepseek_chat(const String& text) {
         String body;
         serializeJson(req_doc, body);
 
-// ---- 发送 POST 请求（HTTPClient 不析构）----
-        // replace=true → 替换旧值而非累积，_headers 永不膨胀
-        s_http.addHeader("Authorization", "Bearer " + String(DEEPSEEK_API_KEY), false, true);
+// ---- 发送 POST 请求 ----
         Serial.printf("[AICHAT] DeepSeek POST %u bytes...\n", body.length());
         unsigned long t0 = millis();
-        int code = s_http.POST((uint8_t*)body.c_str(), body.length());
-        Serial.printf("[AICHAT] DeepSeek HTTP %d (%ums)\n", code, millis() - t0);
+        int code = http.POST((uint8_t*)body.c_str(), body.length());
+        unsigned long elapsed = millis() - t0;
+        Serial.printf("[AICHAT] DeepSeek HTTP %d (%ums)\n", code, elapsed);
 
         if (code <= 0) {
-            // 网络错误：连接已废，清理后重试
             Serial.printf("[AICHAT] DeepSeek connection error: %d\n", code);
-            s_http.end();
-            s_ds_client.stop();
-            continue;
+            http.end();
+            client.stop();
+            return String();
         }
 
-// ---- 读取响应 body（getString 内部 disconnect(true)，keep-alive 不关 SSL）----
-        String resp = s_http.getString();
-
-        if (code != 200) {
-            Serial.printf("[AICHAT] DeepSeek HTTP %d, resp: %s\n", code, resp.substring(0, 200).c_str());
-            s_http.end();
-            s_ds_client.stop();
-            continue;
+// ---- 读取响应 body ----
+// getString() 在新局部对象上可靠工作 — 无 end()/begin() 污染
+        String resp;
+        if (code == 200) {
+            resp = http.getString();
+            Serial.printf("[AICHAT] getString: %u bytes\n", resp.length());
         }
-        if (resp.length() == 0) { Serial.println("[AICHAT] DeepSeek empty response"); continue; }
+        http.end();
+        client.stop();
+        if (resp.length() == 0) {
+            return String();
+        }
 
-// 不调 end() — getString 内部已调 disconnect(true)
-        // keep-alive 时 TCP/SSL 保持；Connection:close 时 _client 指针保留，
-        // 下次 connect() 自动重连 SSL。headers 用 replace=true 替换不累积。
-
-// ---- 每次成功 HTTP 200 后确保 TCP 保活开启（幂等，重连后新 fd 同样生效）----
-        enable_tcp_keepalive();
-
-// 打印原始响应（调试用）
-        Serial.println("===== DEEPSEEK RAW RESPONSE (first 500 chars) =====");
-        Serial.println(resp.substring(0, 500));
-        Serial.println("===== END RAW RESPONSE =====");
+        // ★ 精简打印
+        Serial.printf("[AICHAT] Read body: %u bytes, first 200: %.200s\n", resp.length(), resp.c_str());
 
         JsonDocument doc;
         DeserializationError err = deserializeJson(doc, resp);
-        if (err) { Serial.printf("[AICHAT] DeepSeek JSON parse fail: %s\n", err.c_str()); continue; }
+        if (err) { Serial.printf("[AICHAT] DeepSeek JSON parse fail: %s\n", err.c_str()); return String(); }
 
         const char* content = doc["choices"][0]["message"]["content"];
-        if (!content) { Serial.println("[AICHAT] DeepSeek no content"); continue; }
+        if (!content) { Serial.println("[AICHAT] DeepSeek no content"); return String(); }
 
-        result = String(content);
+        String result(content);
         result.trim();
         Serial.printf("[DEEPSEEK] Parsed content (%u chars):\n%s\n--- end ---\n", result.length(), result.c_str());
 
-// 过滤所有非 ASCII 字符（矢量字库只支持 ASCII）
+// 过滤所有非 ASCII 字符
         String filtered;
         for (size_t i = 0; i < result.length(); i++) {
             char c = result[i];
@@ -455,7 +418,7 @@ static String deepseek_chat(const String& text) {
         }
         filtered.trim();
 
-// 迭代剥离各种包裹符号（```、'''、`、""、' 等），直到无法再剥离
+// 迭代剥离包裹符号
         while (true) {
             int old_len = filtered.length();
             while ((filtered.startsWith("```") || filtered.startsWith("'''")) &&
@@ -489,116 +452,195 @@ static String deepseek_chat(const String& text) {
         Serial.printf("[AICHAT] DeepSeek reply OK, %u chars (filtered from %u)\n", filtered.length(), result.length());
         Serial.printf("[DEEPSEEK] Filtered text: \"%s\"\n", filtered.c_str());
         return filtered;
-    }
-
-// 所有重试都失败
-    Serial.printf("[DSEEK] all attempts failed, heap: %u\n", ESP.getFreeHeap());
-    return String();
 }
 
+// ---- 此函数不再包含内层重试，外层 ai_chat_task 负责 retry ----
 
-// ========== ai_chat_task — Core 0，完整流程（内部对话循环，SSL 连接永不释放）==========
+
+// ========== ai_chat_task — Core 0，持久任务（永不删除）==========
+// Task 永活 (A1) 方案：
+//   - 首次创建后永久存活，栈只分配一次，DRAM 碎片不累计
+//   - 进出用信号量控制：s_aiChatSemaphore 唤醒 → 对话循环
+//   - done 回到顶部等信号量，不清除句柄/PSRAM
+//   - SSL/HTTP 全局单例，永不析构
+//   - PSRAM 缓冲永久保留（ps_malloc 一次后永不 free）
 static void ai_chat_task(void* pvParameters) {
-    Serial.println("[AICHAT] task started");
-    ai_chat_active = true;
+    Serial.println("[AICHAT] persistent task started (A1)");
+    s_aiChatTaskHandle = xTaskGetCurrentTaskHandle();
 
     String recognized, reply;
     int16_t* pcm_buffer = nullptr;
-    size_t total_samples = 0;
     size_t max_samples = SAMPLE_RATE * MAX_RECORD_SEC;
     size_t alloc_bytes = 0;
+    size_t total_samples = 0;
     int16_t chunk_buf[CHUNK_SIZE];
     int high_cnt = 0;
     bool has_action = false;
-    uint8_t saved_step = 16;  // 紧致模式：矢量字间距
+    uint8_t saved_step = 16;
 
-    // AI_Chat_Start() 已设为 CONNECTING，初始化完成后对话循环内才切到 WAITING
-    Serial.printf("[AICHAT] heap free: %u\n", ESP.getFreeHeap());
+    // ★ 持久变量在所有轮次间保持
+    bool first_run = true;
+    bool psram_allocated = false;
 
-    // ---- 设置矢量字间距 ----
-    DRAW_SetStepSize(saved_step);
-
-    // ---- 初始化麦克风 ----
-    Serial.println("[AICHAT] init MIC...");
-    if (!s_mic) {
-        s_mic = new Microphone(MIC_SCK, MIC_WS, MIC_DATA, SAMPLE_RATE);
-        if (!s_mic->init()) {
-            Serial.println("[AICHAT] MIC init FAILED!");
-            ai_show(AI_PHASE_ERROR, "MIC init FAILED!");
-            delete s_mic; s_mic = nullptr;
-            goto done;
+    // ========== 主等待循环：等信号量 → 对话 → done → 回到等信号量 ==========
+    while (true) {
+        // ---- 等信号量（阻塞）----
+        // 首次启动时 s_aiChatSemaphore 由 AI_Chat_Start 给信号
+        // 后续轮次由 AI_Chat_Start() 给信号唤醒
+        // AI_Chat_Stop() 也会给信号确保能从 wait 中退出
+        // 超时 100ms 轮询一遍 ai_chat_active，防止信号量丢失造成永久阻塞
+        while (s_aiChatSemaphore == NULL || xSemaphoreTake(s_aiChatSemaphore, pdMS_TO_TICKS(100)) != pdTRUE) {
+            // 没有信号量对象 → 等创建
+            if (s_aiChatSemaphore == NULL) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+            // 收到 Stop 信号但没信号量 → 重置状态
+            if (!ai_chat_active) {
+                // 没激活就继续等
+            }
         }
-        Serial.println("[AICHAT] MIC ready");
-    }
 
-    // ---- WiFi ----
-    Serial.println("[AICHAT] connect WiFi...");
-    if (!wifi_connect()) { Serial.println("[AICHAT] WiFi FAILED!"); goto done; }
-    Serial.println("[AICHAT] WiFi OK");
+        // 被唤醒后检查：如果是 Stop 信号，回到顶部继续等
+        if (!ai_chat_active) {
+            Serial.println("[AICHAT] woken by Stop, going idle");
+            ai_chat_phase = AI_PHASE_IDLE;
+            ai_chat_display_text[0] = '\0';
+            ai_chat_dirty = true;
+            continue;
+        }
 
-    // ---- Baidu token ----
-    Serial.println("[AICHAT] get Baidu token...");
-    if (!baidu_get_token()) {
-        Serial.println("[AICHAT] Baidu token FAILED!");
-        ai_show(AI_PHASE_ERROR, "Baidu token FAILED!");
-        goto done;
-    }
-    Serial.println("[AICHAT] Baidu token OK");
+        Serial.println("[AICHAT] semaphore taken, starting conversation");
 
-    // ---- 分配 PSRAM ----
-    Serial.println("[AICHAT] alloc PSRAM buffer...");
-    alloc_bytes = max_samples * sizeof(int16_t);
-    pcm_buffer = (int16_t*)ps_malloc(alloc_bytes);
-    if (!pcm_buffer) {
-        Serial.println("[AICHAT] PSRAM alloc FAILED!");
-        ai_show(AI_PHASE_ERROR, "PSRAM alloc failed!");
-        goto done;
-    }
-    Serial.printf("[AICHAT] PSRAM buffer: %u bytes\n", alloc_bytes);
+        // ---- 每轮开始：初始化/恢复环境 ----
+        has_action = false;
+        DRAW_SetStepSize(saved_step);
 
-    // ========== 对话轮次循环（SSL/HTTP/WiFi 连接永不释放）==========
-    Serial.println("[AICHAT] entering conversation loop");
-    while (ai_chat_active) {
+        // ★ 分配 PSRAM 缓冲（仅首次）
+        if (!psram_allocated) {
+            Serial.println("[AICHAT] alloc PSRAM buffer (permanent)...");
+            alloc_bytes = max_samples * sizeof(int16_t);
+            pcm_buffer = (int16_t*)ps_malloc(alloc_bytes);
+            if (!pcm_buffer) {
+                Serial.println("[AICHAT] PSRAM alloc FAILED!");
+                ai_show(AI_PHASE_ERROR, "PSRAM alloc failed!");
+                ai_chat_active = false;
+                continue;
+            }
+            psram_allocated = true;
+            Serial.printf("[AICHAT] PSRAM buffer: %u bytes (permanent)\n", alloc_bytes);
+        }
 
+        // ---- 初始化 MIC（每轮创建，对话结束后释放）----
+        if (test_no_mic) {
+            Serial.println("[AICHAT] TEST MODE: skipping MIC init");
+        } else if (!s_mic) {
+            Serial.println("[AICHAT] init MIC...");
+            s_mic = new Microphone(MIC_SCK, MIC_WS, MIC_DATA, SAMPLE_RATE);
+            if (!s_mic->init()) {
+                Serial.println("[AICHAT] MIC init FAILED!");
+                ai_show(AI_PHASE_ERROR, "MIC init FAILED!");
+                delete s_mic; s_mic = nullptr;
+                ai_chat_active = false;
+                continue;
+            }
+            Serial.println("[AICHAT] MIC ready");
+        }
+
+        // ---- WiFi（首次连，后续 check alive）----
+        if (first_run) {
+            Serial.println("[AICHAT] connect WiFi...");
+            if (!wifi_connect()) { Serial.println("[AICHAT] WiFi FAILED!"); ai_chat_active = false; continue; }
+            Serial.println("[AICHAT] WiFi OK");
+            first_run = false;
+        } else {
+            // ★ 每次会话前检查 WiFi 状态
+            if (WiFi.status() != WL_CONNECTED) {
+                Serial.println("[AICHAT] WiFi lost, reconnecting...");
+                WiFi.reconnect();
+                int w = 0;
+                while (WiFi.status() != WL_CONNECTED && w < 40) { delay(250); w++; }
+                if (WiFi.status() != WL_CONNECTED) {
+                    Serial.println("[AICHAT] WiFi reconnect failed");
+                    ai_chat_active = false;
+                    continue;
+                }
+            }
+        }
+
+        // ---- Baidu token（首次或过期重获）----
+        if (strlen(baidu_token) == 0 || millis() / 1000 >= token_expires) {
+            Serial.println("[AICHAT] get Baidu token...");
+            if (!baidu_get_token()) {
+                Serial.println("[AICHAT] Baidu token FAILED!");
+                ai_show(AI_PHASE_ERROR, "Baidu token FAILED!");
+                ai_chat_active = false;
+                continue;
+            }
+            Serial.println("[AICHAT] Baidu token OK");
+        }
+
+        // ========== 内层对话循环（支持同一轮次内 re-record）==========
+        while (ai_chat_active) {
+
+        // wait_for_enter: 等待 ENTER 按钮（或测试信号）
+        test_btn_triggered = false;  // ★ 清除上次 DONE 阶段可能的残留
         ai_show(AI_PHASE_WAITING, "");
         Serial.println("[AICHAT] WAITING for ENTER press...");
-        while (digitalRead(EN_S) == HIGH) {
-            if (!ai_chat_active) { Serial.println("[AICHAT] cancelled while waiting ENTER"); goto done; }
-            vTaskDelay(pdMS_TO_TICKS(20));
+        Serial.flush();
+        {
+            bool pressed = false;
+            while (!pressed && ai_chat_active) {
+                // 测试模式：btn_triggered 或 btn_pressed
+                if (test_btn_triggered) { test_btn_triggered = false; pressed = true; }
+                else if (test_btn_pressed) { pressed = true; }
+                else if (digitalRead(EN_S) == LOW) { pressed = true; }
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+            if (!ai_chat_active) { Serial.println("[AICHAT] cancelled while waiting ENTER"); goto conversation_done; }
         }
         vTaskDelay(pdMS_TO_TICKS(50));
 
-    // ---- 确保 MIC 已初始化（轮次间可能已被释放）----
-    if (!s_mic) {
+    // ---- 确保 MIC 已初始化（轮次间可能已被释放，测试模式跳过）----
+    if (!test_no_mic && !s_mic) {
         s_mic = new Microphone(MIC_SCK, MIC_WS, MIC_DATA, SAMPLE_RATE);
         if (!s_mic->init()) {
             Serial.println("[AICHAT] MIC re-init FAILED!");
             ai_show(AI_PHASE_ERROR, "MIC re-init FAILED!");
             delete s_mic; s_mic = nullptr;
-            goto done;
+            goto conversation_done;
         }
         Serial.println("[AICHAT] MIC re-initialized");
     }
 
-    // ---- 录音到 PSRAM 缓冲区 ----
+    // ---- 录音到 PSRAM 缓冲区（测试模式：跳过录音，填充占位数据）----
     ai_show(AI_PHASE_RECORDING, "Recording...");
     total_samples = 0;
     high_cnt = 0;
 
-    while (total_samples < max_samples) {
-        if (!ai_chat_active) { Serial.println("[AICHAT] cancelled during recording"); goto done; }
-        if (digitalRead(EN_S) == HIGH) {
-            high_cnt++;
-            if (high_cnt > 15 && total_samples > SAMPLE_RATE / 4) break;
-        } else {
-            high_cnt = 0;
+    if (test_no_mic) {
+        // 测试模式：填充 0.5s 纯静音 PCM，然后标记松手
+        Serial.println("[AICHAT] TEST MODE: synthesizing dummy PCM...");
+        size_t dummy_samples = SAMPLE_RATE / 2;
+        for (size_t i = 0; i < dummy_samples && i < max_samples; i++) {
+            pcm_buffer[i] = 0;
         }
+        total_samples = dummy_samples;
+        vTaskDelay(pdMS_TO_TICKS(100));
+        Serial.printf("[AICHAT] TEST MODE: dummy PCM done (%zu samples)\n", total_samples);
+    } else {
+        while (total_samples < max_samples && ai_chat_active) {
+            if (!ai_chat_active) { Serial.println("[AICHAT] cancelled during recording"); goto conversation_done; }
+            if (digitalRead(EN_S) == HIGH) {
+                high_cnt++;
+                if (high_cnt > 15 && total_samples > SAMPLE_RATE / 4) break;
+            } else {
+                high_cnt = 0;
+            }
 
-        size_t n = s_mic->read(chunk_buf, CHUNK_SIZE);
-        if (n == 0) break;
-        memcpy(pcm_buffer + total_samples, chunk_buf, n * sizeof(int16_t));
-        total_samples += n;
-        vTaskDelay(pdMS_TO_TICKS(1));
+            size_t n = s_mic->read(chunk_buf, CHUNK_SIZE);
+            if (n == 0) break;
+            memcpy(pcm_buffer + total_samples, chunk_buf, n * sizeof(int16_t));
+            total_samples += n;
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 
     Serial.printf("[AICHAT] recording done: %.1fs (%zu samples)\n", (float)total_samples / SAMPLE_RATE, total_samples);
@@ -611,14 +653,19 @@ static void ai_chat_task(void* pvParameters) {
         continue;
     }
 
-    // ---- 释放 MIC（I2S 外设）----
+    // ---- 释放 MIC（测试模式无 MIC 可释放）----
     Serial.println("[AICHAT] release MIC");
     if (s_mic) { delete s_mic; s_mic = nullptr; }
 
-    // ---- ASR ----
-    Serial.println("[AICHAT] start ASR...");
-    ai_show(AI_PHASE_ASR, "");
-    recognized = baidu_asr(pcm_buffer, total_samples);
+    // ---- ASR（测试模式跳过，用固定文本）----
+    if (test_no_mic) {
+        recognized = "I suggest starting by showing them the basics of using the oscilloscope game console.";
+        Serial.printf("[AICHAT] TEST MODE: ASR skipped, using canned text (%u chars)\n", recognized.length());
+    } else {
+        Serial.println("[AICHAT] start ASR...");
+        ai_show(AI_PHASE_ASR, "");
+        recognized = baidu_asr(pcm_buffer, total_samples);
+    }
     if (recognized.length() == 0) {
         Serial.println("[AICHAT] ASR FAILED!");
         ai_show(AI_PHASE_ERROR, "ASR failed!");
@@ -655,7 +702,7 @@ static void ai_chat_task(void* pvParameters) {
         voice_action = VC_NONE;
         has_action = false;
         vTaskDelay(pdMS_TO_TICKS(1500));
-        continue;
+        goto conversation_done;
     }
     Serial.printf("[AICHAT] DeepSeek OK: %u chars\n", reply.length());
 
@@ -675,11 +722,9 @@ static void ai_chat_task(void* pvParameters) {
     Serial.println(String(50, '-') + "\n");
 
     // ---- 保持 REPLY 画面：guiTask 负责退出逻辑 ----
-    // 有动作：显示回复，guiTask 检测 voice_pending 后会执行跳转
-    // 纯文本：直接结束任务，让 guiTask 负责退出逻辑
     if (has_action) {
         Serial.println("[AICHAT] has action, exiting for guiTask to execute");
-        goto done;
+        goto conversation_done;
     }
 
     // ---- pure text: poll ENTER button (short=exit, long=re-record) ----
@@ -692,8 +737,17 @@ static void ai_chat_task(void* pvParameters) {
         bool exit_task = false;
 
         while (!exit_task && ai_chat_active) {
-            bool pressed = (digitalRead(EN_S) == LOW);
+            bool hw_pressed = (digitalRead(EN_S) == LOW);
+            bool pressed = hw_pressed || test_btn_pressed;
             unsigned long now = millis();
+
+            // 测试单次点击：直接标记为短按退出
+            if (test_btn_triggered) {
+                test_btn_triggered = false;
+                Serial.println("[AICHAT] TEST: short click detected");
+                exit_task = true;
+                break;
+            }
 
             if (pressed && !was_pressed) {
                 press_start = now;
@@ -701,7 +755,7 @@ static void ai_chat_task(void* pvParameters) {
             } else if (pressed && was_pressed) {
                 if (now - press_start >= 500) {
                     Serial.println("[AICHAT] Long press, continuing conversation...");
-                    while (ai_chat_active && digitalRead(EN_S) == LOW) {
+                    while (ai_chat_active && (digitalRead(EN_S) == LOW || test_btn_pressed)) {
                         vTaskDelay(pdMS_TO_TICKS(20));
                     }
                     vTaskDelay(pdMS_TO_TICKS(100));
@@ -721,25 +775,26 @@ static void ai_chat_task(void* pvParameters) {
         if (exit_task) break;
     }
 
-    } // while(ai_chat_active)
+    } // while(ai_chat_active) — 内层对话循环
 
-done:
-    Serial.println("[AICHAT] cleanup...");
+conversation_done:
+    // ★ A1 永活清理：释放临时资源，但保留 PSRAM/Task
+    Serial.println("[AICHAT] conversation cleanup (A1 persistent task)");
+    // ★ ESP-NOW 不在此恢复 — SSL 后 esp_now_init() 可能挂起
+    // 由 Network_Manager::init() 在下次网络活动时重建
     ai_chat_dirty = true;
-    // == 显式释放栈上 String（vTaskDelete 不调 C++ 析构函数，内部堆缓冲会泄漏）
-    recognized = String();   // 释放 baidu_asr 结果的内部缓冲
-    reply = String();        // 释放 deepseek_chat 结果的内部缓冲
-    // == SSL/HTTP 单例默认保持 — s_ds_client + s_http 是全局静态，不析构。
-    //   如果 TCP 活着(保活开启) → 下次 deepseek_chat() 零开销复用。
-    //   如果 TCP 断了 → deepseek_chat() 内自动 stop + delay + 重连。
+    recognized = String();
+    reply = String();
     if (s_mic) { delete s_mic; s_mic = nullptr; }
-    if (pcm_buffer) { free(pcm_buffer); Serial.println("[AICHAT] pcm_buffer freed"); }
-    // 注意：故意不恢复 WiFi 省电模式
-    // 如果这里调用 WiFi.setSleep(true)，下次 AI Chat 时 WiFi 模组仍未完全就绪，
-    // 会导致第二次 DeepSeek HTTPS/SSL 握手持续失败
+    test_btn_triggered = false;  // ★ 清除跨轮残留
+    // ★ PSRAM 缓冲永久保留 — 不 free(pcm_buffer)
+    // ★ SSL/HTTP 局部对象已随 deepseek_chat 返回自动析构
+    // ★ Task 不删除 — 回到顶部等信号量
     ai_chat_active = false;
-    s_aiChatTaskHandle = NULL;
+    s_aiChatTaskHandle = xTaskGetCurrentTaskHandle();  // 句柄仍然有效
     Serial.printf("[AICHAT] heap at exit: %u\n", ESP.getFreeHeap());
-    Serial.println("[AICHAT] task exits, vTaskDelete");
-    vTaskDelete(NULL);
+    Serial.println("[AICHAT] conversation done, returning to idle (wait for semaphore)");
+
+    // 回到 while(true) 顶部等信号量唤醒
+    } // while(true) — 外层永活循环
 }

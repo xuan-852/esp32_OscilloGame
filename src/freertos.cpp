@@ -1262,6 +1262,34 @@ static void guiTask(void* pvParameters) {
         
         btn_pressed = btn_pressed_from_hw || btn_pressed_from_gp;
 
+        // ---- 测试信号注入 ----
+        if (test_ai_enter) {
+            test_ai_enter = false;
+            Serial.println("[TEST] guiTask: test_ai_enter");
+            last_encoder = current_encoder;
+            ui_state = UI_AI_CHAT;
+            last_menu_index = -1;
+            AI_Chat_Start();
+            continue;
+        }
+        if (test_ai_exit) {
+            test_ai_exit = false;
+            Serial.println("[TEST] guiTask: test_ai_exit");
+            if (ui_state == UI_AI_CHAT) {
+                AI_Chat_Stop();
+                ui_state = UI_MENU_MAIN;
+                menu_index = 5;
+                last_menu_index = -1;
+                continue;
+            }
+        }
+        // 注意: 不在 UI_AI_CHAT 下消费 test_btn_triggered, 留给 ai_chat_task DONE 轮询使用
+        if (test_btn_triggered && ui_state != UI_AI_CHAT) {
+            test_btn_triggered = false;
+            btn_pressed = true;
+            Serial.println("[TEST] guiTask: test_btn_triggered -> btn_pressed");
+        }
+
         // 记录按钮变低的时间
         if (btn_state == LOW && last_btn_state == HIGH) {
             last_btn_time = millis();

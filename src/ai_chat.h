@@ -36,6 +36,15 @@ extern volatile bool ai_chat_dirty;
 void AI_Chat_Start();
 void AI_Chat_Stop();
 
+// 串口命令分发器 — 从 main.cpp loop() 中调用
+void handle_test_commands();
+
+// ========== 测试接口 (自动化测试用) ==========
+extern volatile bool test_ai_enter;       // 告诉 guiTask 进入 AI Chat
+extern volatile bool test_ai_exit;        // 告诉 guiTask 退出 AI Chat
+extern volatile bool test_btn_pressed;    // 模拟 ENTER 按钮保持按下 (true=按下/LOW)
+extern volatile bool test_btn_triggered;  // 模拟一次按钮点击 (脉冲，消费后清0)
+extern volatile bool test_no_mic;         // true: 跳过 MIC 初始化 (纯链路测试)
 
 #endif
 

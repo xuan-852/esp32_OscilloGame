@@ -10,6 +10,7 @@ extern const uint8_t GAMEPAD_SLAVE_MAC[6] = {0x84, 0x0D, 0x8E, 0xBF, 0xC9, 0x3D}
 #include "FS.h"
 #include "SD_MMC.h"
 #include "dac8554.h"
+#include "ai_chat.h"
 
 // 使用硬件 SPI (CS=10)。SPI 引脚为默认值 (MOSI=11, SCLK=12)
 DAC8554 dac(DAC_CS); 
@@ -79,7 +80,7 @@ void listDir(fs::FS &fs, const char * dirname, uint8_t levels) {
 // 系统初始化函数
 void setup() {
   // 初始化串口
-  Serial.begin(115200);
+  Serial.begin(921600);
   delay(1000);
   Serial.println("\nESP32-S3 Hardware Data Output");
   
@@ -181,6 +182,9 @@ DRAW_Terminal_Print("CHECKING RAM...");
 
 // 主循环函数
 void loop() {
+  // 测试串口命令
+  handle_test_commands();
+
   // 主循环为空，UI 由 FreeRTOS 任务处理
   delay(100); 
   static bool ledState = false;
@@ -188,10 +192,4 @@ void loop() {
     digitalWrite(1,ledState);
     digitalWrite(2,!ledState);
     
-    static unsigned long last_mac_print = 0;
-    if (millis() - last_mac_print >= 10000) {
-      last_mac_print = millis();
-      Serial.printf("MAC: %s\n", WiFi.macAddress().c_str());
-    }
-  
 }

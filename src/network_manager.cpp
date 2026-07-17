@@ -196,6 +196,19 @@ void Network_Manager::init() {
     }
 }
 
+// 轻量级 ESP-NOW 暂停（保留 WiFi，用于 AI Chat 时规避射频冲突）
+void Network_Manager::suspend_esp_now() {
+    esp_now_deinit();
+}
+
+// 恢复 ESP-NOW（重新初始化但不改变 WiFi 模式）
+void Network_Manager::resume_esp_now() {
+    if (esp_now_init() == ESP_OK) {
+        esp_now_register_send_cb(OnDataSent);
+        esp_now_register_recv_cb(OnDataRecv);
+    }
+}
+
 // 禁用网络管理器
 void Network_Manager::disable() {
     esp_now_deinit();
