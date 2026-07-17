@@ -2716,9 +2716,17 @@ static void guiTask(void* pvParameters) {
             }
 
             // ---- 短按（释放时触发）：退出到主菜单 ----
-            // 注意：DONE 阶段由 ai_chat_task 内部轮询按钮（长按=继续，短按=退出）
-            // guiTask 仅在 REPLY/ERROR 阶段处理退出
+            // 注意：DONE 阶段由 ai_chat_task 内部轮询按钮，guiTask 也处理作为双保险
             if (btn_pressed && (millis() - ai_chat_enter_ms > 500)) {
+                if (ai_chat_phase == AI_PHASE_DONE) {
+                    // ★ DONE 阶段：先让 A1 任务退出轮询，再退出 UI
+                    AI_Chat_Stop();
+                    ui_state = UI_MENU_MAIN;
+                    menu_index = 5;
+                    last_menu_index = -1;
+                    rebuild = true;
+                    continue;
+                }
                 if (ai_chat_phase == AI_PHASE_REPLY || ai_chat_phase == AI_PHASE_ERROR) {
                     AI_Chat_Stop();
                     ui_state = UI_MENU_MAIN;
